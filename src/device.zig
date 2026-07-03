@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const util = @import("util.zig");
+const net = @import("net.zig");
 const platform = @import("platform/linux/platform.zig");
 
 pub const DeviceType = enum(u16) {
@@ -22,7 +23,7 @@ pub const DeviceFlags = u16;
 pub const DeviceOps = struct {
     openFn: ?*const fn (*Device) anyerror!void = null,
     closeFn: ?*const fn (*Device) anyerror!void = null,
-    outputFn: *const fn (*Device, u16, []const u8) anyerror!void,
+    outputFn: *const fn (*Device, net.ProtocolType, []const u8) anyerror!void,
 
     pub fn open(self: DeviceOps, dev: *Device) !void {
         const f = self.openFn orelse return;
@@ -34,7 +35,7 @@ pub const DeviceOps = struct {
         return f(dev);
     }
 
-    pub fn output(self: DeviceOps, dev: *Device, typ: u16, data: []const u8) !void {
+    pub fn output(self: DeviceOps, dev: *Device, typ: net.ProtocolType, data: []const u8) !void {
         return self.outputFn(dev, typ, data);
     }
 };
@@ -108,7 +109,7 @@ pub const Device = struct {
         self.flags &= ~@intFromEnum(DeviceFlag.UP);
     }
 
-    pub fn output(self: *Self, typ: u16, data: []const u8) !void {
+    pub fn output(self: *Self, typ: net.ProtocolType, data: []const u8) !void {
         util.debugf(@src(), "dev={s}, type={x:0>4}, len={d}", .{ self.name(), typ, data.len });
         util.debugdump(data);
         if (!self.is_up()) {
@@ -123,11 +124,6 @@ pub const Device = struct {
             util.errorf(@src(), "ops.output() failure, dev={s}, err={t}", .{ self.name(), err });
             return err;
         };
-    }
-
-    pub fn input(self: *Device, typ: u16, data: []const u8) !void {
-        util.debugf(@src(), "dev={s}, type={x:0>4}, len={d}", .{ self.name(), typ, data.len });
-        util.debugdump(data);
     }
 
     pub fn name(self: *const Self) []const u8 {
