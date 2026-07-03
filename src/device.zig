@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const utils = @import("util.zig");
+const util = @import("util.zig");
 const platform = @import("platform/linux/platform.zig");
 
 pub const DeviceType = enum(u16) {
@@ -83,51 +83,51 @@ pub const Device = struct {
     }
 
     pub fn open(self: *Self) !void {
-        utils.infof(@src(), "dev={s}", .{self.name()});
+        util.infof(@src(), "dev={s}", .{self.name()});
         if (self.is_up()) {
-            utils.errorf(@src(), "already opened, dev={s}", .{self.name()});
+            util.errorf(@src(), "already opened, dev={s}", .{self.name()});
             return error.DeviceAlreadyOpened;
         }
         self.ops.open(self) catch |err| {
-            utils.errorf(@src(), "ops.open() failure, dev={s}, err={t}", .{ self.name(), err });
+            util.errorf(@src(), "ops.open() failure, dev={s}, err={t}", .{ self.name(), err });
             return err;
         };
         self.flags |= @intFromEnum(DeviceFlag.UP);
     }
 
     pub fn close(self: *Self) !void {
-        utils.infof(@src(), "dev={s}", .{self.name()});
+        util.infof(@src(), "dev={s}", .{self.name()});
         if (!self.is_up()) {
-            utils.errorf(@src(), "not opened, dev={s}", .{self.name()});
+            util.errorf(@src(), "not opened, dev={s}", .{self.name()});
             return error.DeviceNotOpened;
         }
         self.ops.close(self) catch |err| {
-            utils.errorf(@src(), "ops.close() failure, dev={s}, err={t}", .{ self.name(), err });
+            util.errorf(@src(), "ops.close() failure, dev={s}, err={t}", .{ self.name(), err });
             return err;
         };
         self.flags &= ~@intFromEnum(DeviceFlag.UP);
     }
 
     pub fn output(self: *Self, typ: u16, data: []const u8) !void {
-        utils.debugf(@src(), "dev={s}, type={x:0>4}, len={d}", .{ self.name(), typ, data.len });
-        utils.debugdump(data);
+        util.debugf(@src(), "dev={s}, type={x:0>4}, len={d}", .{ self.name(), typ, data.len });
+        util.debugdump(data);
         if (!self.is_up()) {
-            utils.errorf(@src(), "not opened: dev={s}", .{self.name()});
+            util.errorf(@src(), "not opened: dev={s}", .{self.name()});
             return error.DeviceNotOpened;
         }
         if (self.mtu < data.len) {
-            utils.errorf(@src(), "too long, dev={s}, mtu={d}, len={d}", .{ self.name(), self.mtu, data.len });
+            util.errorf(@src(), "too long, dev={s}, mtu={d}, len={d}", .{ self.name(), self.mtu, data.len });
             return error.DeviceOutputTooLong;
         }
         self.ops.output(self, typ, data) catch |err| {
-            utils.errorf(@src(), "ops.output() failure, dev={s}, err={t}", .{ self.name(), err });
+            util.errorf(@src(), "ops.output() failure, dev={s}, err={t}", .{ self.name(), err });
             return err;
         };
     }
 
     pub fn input(self: *Device, typ: u16, data: []const u8) !void {
-        utils.debugf(@src(), "dev={s}, type={x:0>4}, len={d}", .{ self.name(), typ, data.len });
-        utils.debugdump(data);
+        util.debugf(@src(), "dev={s}, type={x:0>4}, len={d}", .{ self.name(), typ, data.len });
+        util.debugdump(data);
     }
 
     pub fn name(self: *const Self) []const u8 {
@@ -161,7 +161,7 @@ pub fn register(dev: Device) !*Device {
     try devices.append(platform.allocator, ptr);
     device_index += 1;
 
-    utils.infof(@src(), "success, dev={s}, index={d}", .{ ptr.name(), ptr.index });
+    util.infof(@src(), "success, dev={s}, index={d}", .{ ptr.name(), ptr.index });
 
     return ptr;
 }
