@@ -1,6 +1,7 @@
 const std = @import("std");
 const microps = @import("microps");
 
+const device = microps.device;
 const net = microps.net;
 const util = microps.util;
 
@@ -37,12 +38,22 @@ pub const test_data = [_]u8{
 
 var terminate = std.atomic.Value(bool).init(false);
 
+fn dummyInit() !*device.Device {
+    const dev = device.Device.init(
+        device.DeviceType.ETHERNET,
+        128,
+        0,
+        0,
+    );
+    return try device.register(dev);
+}
+
 fn onSignal(signum: std.posix.SIG) callconv(.c) void {
     _ = signum;
     terminate.store(true, .seq_cst);
 }
 
-fn setup() !void {
+fn setup() !*device.Device {
     var sa: std.posix.Sigaction = .{
         .handler = .{ .handler = onSignal },
         .mask = std.posix.sigemptyset(),
@@ -54,10 +65,15 @@ fn setup() !void {
         util.errorf(@src(), "net.init() failure: {t}", .{err});
         return err;
     };
+    const dev = dummyInit() catch |err| {
+        util.errorf(@src(), "dummyInit() failure: {t}", .{err});
+        return err;
+    };
     net.run() catch |err| {
         util.errorf(@src(), "net.run() failure: {t}", .{err});
         return err;
     };
+    return dev;
 }
 
 fn cleanup() !void {
@@ -68,9 +84,13 @@ fn cleanup() !void {
     };
 }
 
-fn appMain(io: std.Io) !void {
+fn appMain(io: std.Io, dev: *device.Device) !void {
     util.debugf(@src(), "press Ctrl+C to terminate", .{});
     while (!terminate.load(.seq_cst)) {
+        dev.output(0x0800, &test_data) catch |err| {
+            util.errorf(@src(), "dev.output() failure: {t}", .{err});
+            return err;
+        };
         try io.sleep(.fromSeconds(1), .awake);
     }
     util.debugf(@src(), "terminate", .{});
@@ -79,7 +99,7 @@ fn appMain(io: std.Io) !void {
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
-    try setup();
-    try appMain(io);
+    const dev = try setup();
+    try appMain(io, dev);
     try cleanup();
 }

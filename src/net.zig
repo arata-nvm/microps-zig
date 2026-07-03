@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const platform = @import("platform/linux/platform.zig");
+const device = @import("device.zig");
 const util = @import("util.zig");
 
 pub fn init() !void {
@@ -18,6 +19,9 @@ pub fn run() !void {
         util.errorf(@src(), "platform.run() failure: {t}", .{err});
         return err;
     };
+    for (device.get_all()) |dev| {
+        try dev.open();
+    }
     util.infof(@src(), "success", .{});
 }
 
@@ -27,5 +31,8 @@ pub fn shutdown() !void {
         util.errorf(@src(), "platform.shutdown() failure: {t}", .{err});
         return err;
     };
+    for (device.get_all()) |dev| {
+        try dev.close();
+    }
     util.infof(@src(), "success", .{});
 }
