@@ -2,6 +2,7 @@ const std = @import("std");
 const microps = @import("microps");
 
 const device = microps.device;
+const loopback = microps.driver.loopback;
 const net = microps.net;
 const util = microps.util;
 
@@ -38,16 +39,6 @@ pub const test_data = [_]u8{
 
 var terminate = std.atomic.Value(bool).init(false);
 
-fn dummyInit() !*device.Device {
-    const dev = device.Device.init(
-        device.DeviceType.ETHERNET,
-        128,
-        0,
-        0,
-    );
-    return try device.register(dev);
-}
-
 fn onSignal(signum: std.posix.SIG) callconv(.c) void {
     _ = signum;
     terminate.store(true, .seq_cst);
@@ -65,8 +56,8 @@ fn setup() !*device.Device {
         util.errorf(@src(), "net.init() failure: {t}", .{err});
         return err;
     };
-    const dev = dummyInit() catch |err| {
-        util.errorf(@src(), "dummyInit() failure: {t}", .{err});
+    const dev = loopback.init() catch |err| {
+        util.errorf(@src(), "loopback.init() failure: {t}", .{err});
         return err;
     };
     net.run() catch |err| {
