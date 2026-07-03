@@ -87,35 +87,35 @@ pub fn debugf(src: std.builtin.SourceLocation, comptime fmt: []const u8, args: a
     logf('D', src, fmt, args);
 }
 
-pub fn hexdump(data: []const u8) void {
-    std.debug.print("+------+-------------------------------------------------+------------------+\n", .{});
+pub fn hexdump(writer: anytype, data: []const u8) void {
+    writer.print("+------+-------------------------------------------------+------------------+\n", .{});
     var offset: usize = 0;
     while (offset < data.len) : (offset += 16) {
-        std.debug.print("| {x:0>4} | ", .{offset});
+        writer.print("| {x:0>4} | ", .{offset});
         for (0..16) |index| {
             if (offset + index < data.len) {
-                std.debug.print("{x:0>2} ", .{data[offset + index]});
+                writer.print("{x:0>2} ", .{data[offset + index]});
             } else {
-                std.debug.print("   ", .{});
+                writer.print("   ", .{});
             }
         }
-        std.debug.print("| ", .{});
+        writer.print("| ", .{});
         for (0..16) |index| {
             if (offset + index < data.len) {
                 const c = data[offset + index];
-                std.debug.print("{c}", .{if (std.ascii.isPrint(c)) c else '.'});
+                writer.print("{c}", .{if (std.ascii.isPrint(c)) c else '.'});
             } else {
-                std.debug.print(" ", .{});
+                writer.print(" ", .{});
             }
         }
-        std.debug.print(" |\n", .{});
+        writer.print(" |\n", .{});
     }
-    std.debug.print("+------+-------------------------------------------------+------------------+\n", .{});
+    writer.print("+------+-------------------------------------------------+------------------+\n", .{});
 }
 
 pub fn debugdump(data: []const u8) void {
     if (build_options.hexdump) {
-        hexdump(data);
+        hexdump(std.debug, data);
     }
 }
 
