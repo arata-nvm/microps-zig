@@ -46,7 +46,7 @@ fn onSignal(signum: std.posix.SIG) callconv(.c) void {
     terminate.store(true, .seq_cst);
 }
 
-fn setup() !*device.Device {
+fn setup() !void {
     var sa: std.posix.Sigaction = .{
         .handler = .{ .handler = onSignal },
         .mask = std.posix.sigemptyset(),
@@ -83,7 +83,6 @@ fn setup() !*device.Device {
         util.errorf(@src(), "net.run() failure: {t}", .{err});
         return err;
     };
-    return dev;
 }
 
 fn cleanup() !void {
@@ -94,11 +93,18 @@ fn cleanup() !void {
     };
 }
 
-fn appMain(io: std.Io, dev: *device.Device) !void {
+fn appMain(io: std.Io) !void {
+    const offset = ip.IP_HDR_SIZE_MIN;
+    const src = ip.IpAddr.fromString(LOOPBACK_IP_ADDR) catch |err| {
+        util.errorf(@src(), "IpAddr.fromString() failure: {t}", .{err});
+        return err;
+    };
+    const dst = src;
+
     util.debugf(@src(), "press Ctrl+C to terminate", .{});
     while (!terminate.load(.seq_cst)) {
-        dev.output(.ip, &test_data) catch |err| {
-            util.errorf(@src(), "dev.output() failure: {t}", .{err});
+        _ = ip.output(1, test_data[offset..], src, dst) catch |err| {
+            util.errorf(@src(), "ip.output() failure: {t}", .{err});
             return err;
         };
         try io.sleep(.fromSeconds(1), .awake);
@@ -109,7 +115,7 @@ fn appMain(io: std.Io, dev: *device.Device) !void {
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
 
-    const dev = try setup();
-    try appMain(io, dev);
+    try setup();
+    try appMain(io);
     try cleanup();
 }

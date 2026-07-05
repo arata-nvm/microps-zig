@@ -1,8 +1,6 @@
 const std = @import("std");
 const build_options = @import("build_options");
 
-const native_endian = @import("builtin").cpu.arch.endian();
-
 pub fn timevalAddUsec(x: *std.c.timeval, usec: i64) void {
     x.sec += @intCast(@divTrunc(usec, std.time.us_per_s));
     x.usec += @intCast(@mod(usec, std.time.us_per_s));
@@ -174,28 +172,12 @@ pub fn Queue(comptime T: type) type {
     };
 }
 
-pub fn hton16(h: u16) u16 {
-    return std.mem.nativeToBig(u16, h);
-}
-
-pub fn ntoh16(n: u16) u16 {
-    return std.mem.bigToNative(u16, n);
-}
-
-pub fn hton32(h: u32) u32 {
-    return std.mem.nativeToBig(u32, h);
-}
-
-pub fn ntoh32(n: u32) u32 {
-    return std.mem.bigToNative(u32, n);
-}
-
 /// Checksum (RFC 1071)
 pub fn cksum16(data: []const u8, init: u32) u16 {
     var sum: u32 = init;
     var i: usize = 0;
     while (i + 2 <= data.len) : (i += 2) {
-        sum += std.mem.readInt(u16, data[i..][0..2], native_endian);
+        sum += std.mem.readInt(u16, data[i..][0..2], .big);
     }
     if (i < data.len) {
         sum += data[i];
@@ -229,13 +211,6 @@ test "queue" {
     try std.testing.expectEqual(3, queue.pop().?.data);
     try std.testing.expectEqual(null, queue.pop());
     try std.testing.expectEqual(0, queue.num);
-}
-
-test "byteorder" {
-    const be_bytes = std.mem.toBytes(hton16(0x1234));
-    try std.testing.expectEqualSlices(u8, &.{ 0x12, 0x34 }, &be_bytes);
-    try std.testing.expectEqual(@as(u16, 0x1234), ntoh16(hton16(0x1234)));
-    try std.testing.expectEqual(@as(u32, 0x12345678), ntoh32(hton32(0x12345678)));
 }
 
 test "cksum16" {

@@ -25,5 +25,7 @@ pub const Lock = struct {
 };
 
 pub fn random16() u16 {
-    return std.crypto.random.int(u16);
+    var b: [2]u8 = undefined;
+    std.debug.assert(std.os.linux.getrandom(&b, b.len, 0) == b.len);
+    return @bitCast(b);
 }

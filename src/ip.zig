@@ -1,5 +1,4 @@
 const std = @import("std");
-const build_options = @import("build_options");
 
 const device = @import("device.zig");
 const net = @import("net.zig");
@@ -8,16 +7,16 @@ const util = @import("util.zig");
 
 const IP_VERSION_V4 = 4;
 
-const IP_HDR_SIZE_MIN = 20;
+pub const IP_HDR_SIZE_MIN = 20;
 const IP_HDR_SIZE_MAX = 60;
 
 const IP_TOTAL_SIZE_MAX = std.math.maxInt(u16);
 const IP_PAYLOAD_SIZE_MAX = IP_TOTAL_SIZE_MAX - IP_HDR_SIZE_MIN;
 
 const IpHdrFlags = packed struct(u3) {
-    mf: bool,
-    df: bool,
-    rf: bool,
+    mf: bool = false,
+    df: bool = false,
+    rf: bool = false,
 
     pub fn format(
         self: @This(),
@@ -56,6 +55,10 @@ pub const IpAddr = struct {
         return self.addr == other.addr;
     }
 
+    pub fn isSameSubnet(self: Self, other: Self, netmask: Self) bool {
+        return (self.addr & netmask.addr) == (other.addr & netmask.addr);
+    }
+
     pub fn format(self: Self, writer: anytype) !void {
         try writer.print("{d}.{d}.{d}.{d}", .{
             (self.addr >> 24) & 0xff,
@@ -66,109 +69,105 @@ pub const IpAddr = struct {
     }
 };
 
-const IpHdrView = struct {
+const IpHdr = struct {
     const Self = @This();
-
     const OFFSET_MASK = 0x1fff;
 
-    packet: []const u8,
+    version: u4,
+    hlen_4byte: u4,
+    tos: u8,
+    total: u16,
+    id: u16,
+    flags: IpHdrFlags,
+    offset: u13,
+    ttl: u8,
+    protocol: u8,
+    sum: u16,
+    src: IpAddr,
+    dst: IpAddr,
 
-    pub fn parse(packet: []const u8) !Self {
+    fn hlen(self: Self) u16 {
+        return @as(u16, self.hlen_4byte) << 2;
+    }
+
+    pub fn decode(packet: []const u8) !Self {
         if (packet.len < IP_HDR_SIZE_MIN) {
             util.errorf(@src(), "too short, len={d}", .{packet.len});
             return error.IpPacketTooShort;
         }
-        const self = Self{ .packet = packet };
-        if (self.v() != IP_VERSION_V4) {
-            util.errorf(@src(), "ip version error, v={d}", .{self.v()});
-            return error.IpVersionError;
-        }
-        if (packet.len < self.hlen()) {
-            util.errorf(@src(), "header length error: len={d}  hlen={d}", .{ packet.len, self.hlen() });
-            return error.IpHeaderLengthError;
-        }
-        if (util.cksum16(packet, 0) != 0) {
-            util.errorf(@src(), "checksum error", .{});
-            return error.IpChecksumError;
-        }
-        if (packet.len < self.total()) {
-            util.errorf(@src(), "total length error: len={d} < total={d}", .{ packet.len, self.total() });
-            return error.IpTotalLengthError;
-        }
+        const self = Self{
+            .version = @intCast(packet[0] >> 4),
+            .hlen_4byte = @intCast(packet[0] & 0x0f),
+            .tos = packet[1],
+            .total = std.mem.readInt(u16, packet[2..4], .big),
+            .id = std.mem.readInt(u16, packet[4..6], .big),
+            .flags = @bitCast(@as(u3, @truncate(std.mem.readInt(u16, packet[6..8], .big) >> 13))),
+            .offset = @intCast(std.mem.readInt(u16, packet[6..8], .big) & OFFSET_MASK),
+            .ttl = packet[8],
+            .protocol = packet[9],
+            .sum = std.mem.readInt(u16, packet[10..12], .big),
+            .src = IpAddr.fromBytes(@as([4]u8, packet[12..16].*)),
+            .dst = IpAddr.fromBytes(@as([4]u8, packet[16..20].*)),
+        };
+        try self.validate(packet);
         return self;
     }
 
-    pub fn vhl(self: Self) u8 {
-        return self.packet[0];
+    fn validate(self: Self, packet: []const u8) !void {
+        if (self.version != IP_VERSION_V4) {
+            util.errorf(@src(), "ip version error, v={d}", .{self.version});
+            return error.IpVersionError;
+        }
+        if (packet.len < self.total) {
+            util.errorf(@src(), "total length error: len={d} < total={d}", .{ packet.len, self.total });
+            return error.IpTotalLengthError;
+        }
+        if (packet.len < self.hlen()) {
+            util.errorf(@src(), "header length error: len={d} < hlen={d}", .{ packet.len, self.hlen() });
+            return error.IpHeaderLengthError;
+        }
+        if (self.total < self.hlen()) {
+            util.errorf(@src(), "total length error: total={d} < hlen={d}", .{ self.total, self.hlen() });
+            return error.IpTotalLengthError;
+        }
+        if (util.cksum16(packet[0..self.hlen()], 0) != 0) {
+            util.errorf(@src(), "checksum error", .{});
+            return error.IpChecksumError;
+        }
     }
 
-    pub fn v(self: Self) u4 {
-        return @intCast(self.vhl() >> 4);
-    }
+    pub fn encode(self: *Self, buf: []u8) !void {
+        if (buf.len < self.hlen()) {
+            util.errorf(@src(), "buffer too short: len={d} < hlen={d}", .{ buf.len, self.hlen() });
+            return error.IpBufferTooShort;
+        }
 
-    pub fn hlen(self: Self) u8 {
-        const hl: u8 = @intCast(self.vhl() & 0x0f);
-        return hl << 2;
-    }
-
-    pub fn tos(self: Self) u8 {
-        return self.packet[1];
-    }
-
-    pub fn total(self: Self) u16 {
-        return std.mem.readInt(u16, self.packet[2..4], .big);
-    }
-
-    pub fn id(self: Self) u16 {
-        return util.ntoh16(std.mem.readInt(u16, self.packet[4..6], .big));
-    }
-
-    pub fn offsetFlag(self: Self) u16 {
-        return std.mem.readInt(u16, self.packet[6..8], .big);
-    }
-
-    pub fn flags(self: Self) IpHdrFlags {
-        return @bitCast(@as(u3, @truncate(self.offsetFlag() >> 13)));
-    }
-
-    pub fn offset(self: Self) u16 {
-        return self.offsetFlag() & OFFSET_MASK;
-    }
-
-    pub fn ttl(self: Self) u8 {
-        return self.packet[8];
-    }
-
-    pub fn protocol(self: Self) u8 {
-        return self.packet[9];
-    }
-
-    pub fn sum(self: Self) u16 {
-        return util.ntoh16(std.mem.readInt(u16, self.packet[10..12], .big));
-    }
-
-    pub fn src(self: Self) IpAddr {
-        return IpAddr.fromBytes(@as([4]u8, self.packet[12..16].*));
-    }
-
-    pub fn dst(self: Self) IpAddr {
-        return IpAddr.fromBytes(@as([4]u8, self.packet[16..20].*));
+        buf[0] = (@as(u8, self.version) << 4) | self.hlen_4byte;
+        buf[1] = self.tos;
+        std.mem.writeInt(u16, buf[2..4], self.total, .big);
+        std.mem.writeInt(u16, buf[4..6], self.id, .big);
+        std.mem.writeInt(u16, buf[6..8], (@as(u16, @as(u3, @bitCast(self.flags))) << 13) | self.offset, .big);
+        buf[8] = self.ttl;
+        buf[9] = self.protocol;
+        std.mem.writeInt(u16, buf[10..12], 0, .big);
+        std.mem.writeInt(u32, buf[12..16], self.src.addr, .big);
+        std.mem.writeInt(u32, buf[16..20], self.dst.addr, .big);
+        std.debug.assert(self.hlen() == IP_HDR_SIZE_MIN);
+        self.sum = util.cksum16(buf[0..self.hlen()], 0);
+        std.mem.writeInt(u16, buf[10..12], self.sum, .big);
     }
 
     pub fn format(self: Self, writer: anytype) !void {
-        try writer.print("        vhl: 0x{x:0>2} [v={d}, hl={d} ({d})]\n", .{ self.vhl(), self.v(), self.hlen() >> 2, self.hlen() });
-        try writer.print("        tos: 0x{x:0>2}\n", .{self.tos()});
-        try writer.print("      total: {d} (payload={d})\n", .{ self.total(), self.total() - self.hlen() });
-        try writer.print("         id: {d}\n", .{self.id()});
-        try writer.print("     offset: 0x{x:0>4} [flags={f}, offset={d}]\n", .{ self.offsetFlag(), self.flags(), self.offset() });
-        try writer.print("        ttl: {d}\n", .{self.ttl()});
-        try writer.print("   protocol: {d}\n", .{self.protocol()});
-        try writer.print("        sum: 0x{x:0>4}\n", .{self.sum()});
-        try writer.print("        src: {f}\n", .{self.src()});
-        try writer.print("        dst: {f}\n", .{self.dst()});
-        if (build_options.hexdump) {
-            util.hexdump(std.debug, self.packet);
-        }
+        try writer.print("        vhl: [v={d}, hl={d} ({d})]\n", .{ self.version, self.hlen_4byte, self.hlen() });
+        try writer.print("        tos: 0x{x:0>2}\n", .{self.tos});
+        try writer.print("      total: {d} (payload={d})\n", .{ self.total, self.total - self.hlen() });
+        try writer.print("         id: {d}\n", .{self.id});
+        try writer.print("     offset: [flags={f}, offset={d}]\n", .{ self.flags, self.offset });
+        try writer.print("        ttl: {d}\n", .{self.ttl});
+        try writer.print("   protocol: {d}\n", .{self.protocol});
+        try writer.print("        sum: 0x{x:0>4}\n", .{self.sum});
+        try writer.print("        src: {f}\n", .{self.src});
+        try writer.print("        dst: {f}\n", .{self.dst});
     }
 };
 
@@ -196,6 +195,10 @@ pub const IpIface = struct {
 
         return self;
     }
+
+    pub fn dev(self: *Self) *device.Device {
+        return self.iface.dev;
+    }
 };
 
 var ifaces: std.ArrayList(*IpIface) = .empty;
@@ -207,31 +210,16 @@ pub fn init() !void {
     };
 }
 
-pub fn registerIface(dev: *device.Device, iface: *IpIface) !void {
-    const allocator = platform.allocator;
-    try dev.addIface(&iface.iface);
-    try ifaces.append(allocator, iface);
-}
-
-pub fn selectIface(addr: IpAddr) ?*IpIface {
-    for (ifaces.items) |entry| {
-        if (entry.unicast.eql(addr)) {
-            return entry;
-        }
-    }
-    return null;
-}
-
 fn input(data: []const u8, dev: *device.Device) !void {
     util.debugf(@src(), "dev={s}, len={d}", .{ dev.name(), data.len });
     util.debugdump(data);
-    const hdr = try IpHdrView.parse(data);
-    if (hdr.flags().mf or hdr.offset() != 0) {
+    const hdr = try IpHdr.decode(data);
+    if (hdr.flags.mf or hdr.offset != 0) {
         util.errorf(@src(), "fragments does not supported", .{});
         return error.IpFragmentedPacketNotSupported;
     }
     const iface = dev.getIface(IpIface) orelse return;
-    const dst = hdr.dst();
+    const dst = hdr.dst;
     if (!dst.eql(iface.unicast)) {
         if (!dst.eql(iface.broadcast) and !dst.eql(IpAddr.broadcast)) {
             // ignore: for other host
@@ -240,4 +228,110 @@ fn input(data: []const u8, dev: *device.Device) !void {
     }
     util.debugf(@src(), "permit, dev={s}, iface={f}", .{ dev.name(), iface.unicast });
     std.debug.print("{f}", .{hdr});
+}
+
+pub fn registerIface(dev: *device.Device, iface: *IpIface) !void {
+    const allocator = platform.allocator;
+    try dev.addIface(&iface.iface);
+    try ifaces.append(allocator, iface);
+}
+
+pub fn output(protocol: u8, data: []const u8, src: IpAddr, dst: IpAddr) !usize {
+    util.debugf(@src(), "{f} => {f}, protocol={d}, len={d}", .{ src, dst, protocol, data.len });
+    if (src.eql(IpAddr.any)) {
+        util.errorf(@src(), "ip routing not implemented", .{});
+        return error.IpRoutingNotImplemented;
+    }
+    const iface = selectIface(src) orelse {
+        util.errorf(@src(), "iface not found: src={f}", .{src});
+        return error.IpIfaceNotFound;
+    };
+    if (!dst.isSameSubnet(iface.unicast, iface.netmask) and !dst.eql(IpAddr.broadcast)) {
+        util.errorf(@src(), "not reached, dst={f}", .{dst});
+        return error.IpNotReached;
+    }
+    if (iface.dev().mtu < IP_HDR_SIZE_MIN + data.len) {
+        util.errorf(@src(), "too long, dev={s}, mtu={d} < len={d}", .{ iface.dev().name(), iface.dev().mtu, IP_HDR_SIZE_MIN + data.len });
+        return error.IpPayloadTooLarge;
+    }
+
+    const id = platform.random16();
+    const allocator = platform.allocator;
+    const buf = try allocator.alloc(u8, IP_TOTAL_SIZE_MAX);
+    defer allocator.free(buf);
+    const packet = buildPacket(buf, protocol, data, id, 0, iface.unicast, dst) catch |err| {
+        util.errorf(@src(), "buildPacket() failure: {t}", .{err});
+        return err;
+    };
+    outputDevice(iface, packet, dst) catch |err| {
+        util.errorf(@src(), "outputDevice() failure: {t}", .{err});
+        return err;
+    };
+    return packet.len;
+}
+
+fn selectIface(addr: IpAddr) ?*IpIface {
+    for (ifaces.items) |entry| {
+        if (entry.unicast.eql(addr)) {
+            return entry;
+        }
+    }
+    return null;
+}
+
+fn outputDevice(iface: *IpIface, data: []const u8, target: IpAddr) !void {
+    util.debugf(@src(), "dev={s}, len={d}, target={f}", .{ iface.dev().name(), data.len, target });
+    if (iface.dev().flags.need_arp) {
+        if (target.eql(iface.broadcast) or target.eql(IpAddr.broadcast)) {} else {
+            util.errorf(@src(), "ARP not implemented", .{});
+            return error.IpArpNotImplemented;
+        }
+    }
+    return iface.dev().output(.ip, data);
+}
+
+fn buildPacket(buf: []u8, protocol: u8, data: []const u8, id: u16, offset: u13, src: IpAddr, dst: IpAddr) ![]const u8 {
+    const hlen = IP_HDR_SIZE_MIN;
+    const total = hlen + data.len;
+    if (buf.len < total) {
+        return error.IpBufferTooShort;
+    }
+    var hdr = IpHdr{
+        .version = IP_VERSION_V4,
+        .hlen_4byte = hlen >> 2,
+        .tos = 0,
+        .total = @intCast(total),
+        .id = id,
+        .flags = .{},
+        .offset = offset,
+        .ttl = 0xff,
+        .protocol = protocol,
+        .sum = 0,
+        .src = src,
+        .dst = dst,
+    };
+    try hdr.encode(buf);
+    std.debug.print("{f}", .{hdr});
+    return buf[0..total];
+}
+
+test "IpHdr round-trip" {
+    const packet = [_]u8{
+        0x45, 0x00, 0x00, 0x30,
+        0x00, 0x80, 0x00, 0x00,
+        0xff, 0x01, 0xbd, 0x4a,
+        0x7f, 0x00, 0x00, 0x01,
+        0x7f, 0x00, 0x00, 0x01,
+        0x08, 0x00, 0x35, 0x64,
+        0x00, 0x80, 0x00, 0x01,
+        0x31, 0x32, 0x33, 0x34,
+        0x35, 0x36, 0x37, 0x38,
+        0x39, 0x30, 0x21, 0x40,
+        0x23, 0x24, 0x25, 0x5e,
+        0x26, 0x2a, 0x28, 0x29,
+    };
+    var hdr = try IpHdr.decode(&packet);
+    var buf: [IP_HDR_SIZE_MIN]u8 = undefined;
+    try hdr.encode(&buf);
+    try std.testing.expectEqualSlices(u8, packet[0..IP_HDR_SIZE_MIN], &buf);
 }
