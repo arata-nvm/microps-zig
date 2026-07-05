@@ -25,6 +25,15 @@ pub const DeviceFlags = packed struct(u16) {
     }
 };
 
+pub const IfaceFamily = enum {
+    ip,
+    ipv6,
+};
+
+pub const Iface = struct {
+    dev: *Device = undefined,
+    family: IfaceFamily,
+};
 
 pub const DeviceOps = struct {
     openFn: ?*const fn (*Device) anyerror!void = null,
@@ -64,6 +73,7 @@ pub const Device = struct {
     broadcast: [ADDR_LEN]u8,
 
     ops: DeviceOps,
+    ifaces: std.ArrayList(*Iface) = .empty,
 
     pub fn init(typ: DeviceType, mtu: u16, flags: DeviceFlags, hlen: u16, alen: u16, ops: DeviceOps) Self {
         return Self{
@@ -130,6 +140,30 @@ pub const Device = struct {
             util.errorf(@src(), "ops.output() failure, dev={s}, err={t}", .{ self.name(), err });
             return err;
         };
+    }
+
+    pub fn addIface(self: *Self, iface: *Iface) !void {
+        for (self.ifaces.items) |entry| {
+            if (entry.family == iface.family) {
+                util.errorf(@src(), "already exists, dev={s}, family={t}", .{ self.name(), iface.family });
+                return error.DeviceIfaceAlreadyExists;
+            }
+        }
+
+        const allocator = platform.allocator;
+        try self.ifaces.append(allocator, iface);
+        iface.dev = self;
+        util.infof(@src(), "success, dev={s}", .{self.name()});
+    }
+
+    pub fn getIface(self: *const Self, comptime T: type) ?*T {
+        for (self.ifaces.items) |entry| {
+            if (entry.family == T.family) {
+                return @fieldParentPtr("iface", entry);
+            }
+        }
+
+        return null;
     }
 
     pub fn name(self: *const Self) []const u8 {

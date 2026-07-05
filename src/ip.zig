@@ -3,6 +3,7 @@ const build_options = @import("build_options");
 
 const device = @import("device.zig");
 const net = @import("net.zig");
+const platform = @import("platform/linux/platform.zig");
 const util = @import("util.zig");
 
 const IP_VERSION_V4 = 4;
@@ -38,6 +39,17 @@ pub const IpAddr = struct {
 
     pub fn fromBytes(bytes: [LEN]u8) IpAddr {
         return IpAddr{ .addr = std.mem.readInt(u32, bytes[0..], .big) };
+    }
+
+    pub fn fromString(s: []const u8) !IpAddr {
+        var parts: [4]u8 = undefined;
+        var it = std.mem.splitScalar(u8, s, '.');
+        for (&parts) |*p| {
+            const tok = it.next() orelse return error.IpAddrParseError;
+            p.* = std.fmt.parseInt(u8, tok, 10) catch return error.IpAddrParseError;
+        }
+        if (it.next() != null) return error.IpAddrParseError;
+        return fromBytes(parts);
     }
 
     pub fn eql(self: Self, other: Self) bool {
@@ -160,11 +172,54 @@ const IpHdrView = struct {
     }
 };
 
+pub const IpIface = struct {
+    const Self = @This();
+    pub const family: device.IfaceFamily = .ip;
+
+    iface: device.Iface,
+    unicast: IpAddr,
+    netmask: IpAddr,
+    broadcast: IpAddr,
+
+    pub fn create(allocator: std.mem.Allocator, unicast: IpAddr, netmask: IpAddr) !*Self {
+        const self = try allocator.create(Self);
+
+        const broadcast = IpAddr{ .addr = (unicast.addr & netmask.addr) | ~netmask.addr };
+        self.* = .{
+            .iface = .{
+                .family = family,
+            },
+            .unicast = unicast,
+            .netmask = netmask,
+            .broadcast = broadcast,
+        };
+
+        return self;
+    }
+};
+
+var ifaces: std.ArrayList(*IpIface) = .empty;
+
 pub fn init() !void {
     net.register(.ip, input) catch |err| {
         util.errorf(@src(), "net.register() failure: {t}", .{err});
         return err;
     };
+}
+
+pub fn registerIface(dev: *device.Device, iface: *IpIface) !void {
+    const allocator = platform.allocator;
+    try dev.addIface(&iface.iface);
+    try ifaces.append(allocator, iface);
+}
+
+pub fn selectIface(addr: IpAddr) ?*IpIface {
+    for (ifaces.items) |entry| {
+        if (entry.unicast.eql(addr)) {
+            return entry;
+        }
+    }
+    return null;
 }
 
 fn input(data: []const u8, dev: *device.Device) !void {
@@ -175,5 +230,14 @@ fn input(data: []const u8, dev: *device.Device) !void {
         util.errorf(@src(), "fragments does not supported", .{});
         return error.IpFragmentedPacketNotSupported;
     }
+    const iface = dev.getIface(IpIface) orelse return;
+    const dst = hdr.dst();
+    if (!dst.eql(iface.unicast)) {
+        if (!dst.eql(iface.broadcast) and !dst.eql(IpAddr.broadcast)) {
+            // ignore: for other host
+            return;
+        }
+    }
+    util.debugf(@src(), "permit, dev={s}, iface={f}", .{ dev.name(), iface.unicast });
     std.debug.print("{f}", .{hdr});
 }

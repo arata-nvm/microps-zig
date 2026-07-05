@@ -3,7 +3,9 @@ const microps = @import("microps");
 
 const device = microps.device;
 const loopback = microps.driver.loopback;
+const ip = microps.ip;
 const net = microps.net;
+const platform = microps.platform;
 const util = microps.util;
 
 // Scope of Internet host loopback address.
@@ -58,6 +60,23 @@ fn setup() !*device.Device {
     };
     const dev = loopback.init() catch |err| {
         util.errorf(@src(), "loopback.init() failure: {t}", .{err});
+        return err;
+    };
+    const allocator = platform.allocator;
+    const unicast = ip.IpAddr.fromString(LOOPBACK_IP_ADDR) catch |err| {
+        util.errorf(@src(), "IpAddr.fromString() failure: {t}", .{err});
+        return err;
+    };
+    const netmask = ip.IpAddr.fromString(LOOPBACK_NETMASK) catch |err| {
+        util.errorf(@src(), "IpAddr.fromString() failure: {t}", .{err});
+        return err;
+    };
+    const iface = ip.IpIface.create(allocator, unicast, netmask) catch |err| {
+        util.errorf(@src(), "IpIface.create() failure: {t}", .{err});
+        return err;
+    };
+    ip.registerIface(dev, iface) catch |err| {
+        util.errorf(@src(), "ip.registerIface() failure: {t}", .{err});
         return err;
     };
     net.run() catch |err| {
