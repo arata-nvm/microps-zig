@@ -6,9 +6,9 @@ const ip = @import("ip.zig");
 const util = @import("util.zig");
 
 pub const ProtocolType = enum(u16) {
-    IP = 0x0800,
-    ARP = 0x0806,
-    IPV6 = 0x86dd,
+    ip = 0x0800,
+    arp = 0x0806,
+    ipv6 = 0x86dd,
 };
 
 pub const ProtocolHandler = *const fn (data: []const u8, dev: *device.Device) anyerror!void;
@@ -70,7 +70,7 @@ pub fn run() !void {
         util.errorf(@src(), "platform.run() failure: {t}", .{err});
         return err;
     };
-    for (device.get_all()) |dev| {
+    for (device.getAll()) |dev| {
         try dev.open();
     }
     util.infof(@src(), "success", .{});
@@ -82,7 +82,7 @@ pub fn shutdown() !void {
         util.errorf(@src(), "platform.shutdown() failure: {t}", .{err});
         return err;
     };
-    for (device.get_all()) |dev| {
+    for (device.getAll()) |dev| {
         try dev.close();
     }
     util.infof(@src(), "success", .{});

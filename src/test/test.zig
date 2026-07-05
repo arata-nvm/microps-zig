@@ -78,7 +78,7 @@ fn cleanup() !void {
 fn appMain(io: std.Io, dev: *device.Device) !void {
     util.debugf(@src(), "press Ctrl+C to terminate", .{});
     while (!terminate.load(.seq_cst)) {
-        dev.output(net.ProtocolType.IP, &test_data) catch |err| {
+        dev.output(.ip, &test_data) catch |err| {
             util.errorf(@src(), "dev.output() failure: {t}", .{err});
             return err;
         };

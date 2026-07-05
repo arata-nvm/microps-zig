@@ -13,35 +13,49 @@ const IP_HDR_SIZE_MAX = 60;
 const IP_TOTAL_SIZE_MAX = std.math.maxInt(u16);
 const IP_PAYLOAD_SIZE_MAX = IP_TOTAL_SIZE_MAX - IP_HDR_SIZE_MIN;
 
-const IpHdrFlag = enum(u16) {
-    MF = 0x1,
-    DF = 0x2,
-    RF = 0x4,
+const IpHdrFlags = packed struct(u3) {
+    mf: bool,
+    df: bool,
+    rf: bool,
+
+    pub fn format(
+        self: @This(),
+        writer: *std.Io.Writer,
+    ) !void {
+        try writer.print("{x}", .{@as(u3, @bitCast(self))});
+    }
 };
 
-const IpHdrFlags = u16;
-
-const IpAddr = struct {
-    pub const Self = @This();
+pub const IpAddr = struct {
+    const Self = @This();
 
     pub const LEN = 4;
 
-    addr: [LEN]u8,
+    addr: u32,
 
-    pub const any = IpAddr{ .addr = [LEN]u8{ 0x00, 0x00, 0x00, 0x00 } };
-    pub const broadcast = IpAddr{ .addr = [LEN]u8{ 0xff, 0xff, 0xff, 0xff } };
+    pub const any = IpAddr{ .addr = 0x00000000 };
+    pub const broadcast = IpAddr{ .addr = 0xffffffff };
 
     pub fn fromBytes(bytes: [LEN]u8) IpAddr {
-        return IpAddr{ .addr = bytes };
+        return IpAddr{ .addr = std.mem.readInt(u32, bytes[0..], .big) };
+    }
+
+    pub fn eql(self: Self, other: Self) bool {
+        return self.addr == other.addr;
     }
 
     pub fn format(self: Self, writer: anytype) !void {
-        try writer.print("{d}.{d}.{d}.{d}", .{ self.addr[0], self.addr[1], self.addr[2], self.addr[3] });
+        try writer.print("{d}.{d}.{d}.{d}", .{
+            (self.addr >> 24) & 0xff,
+            (self.addr >> 16) & 0xff,
+            (self.addr >> 8) & 0xff,
+            self.addr & 0xff,
+        });
     }
 };
 
 const IpHdrView = struct {
-    pub const Self = @This();
+    const Self = @This();
 
     const OFFSET_MASK = 0x1fff;
 
@@ -97,16 +111,16 @@ const IpHdrView = struct {
         return util.ntoh16(std.mem.readInt(u16, self.packet[4..6], .big));
     }
 
-    pub fn offset_flag(self: Self) u16 {
+    pub fn offsetFlag(self: Self) u16 {
         return std.mem.readInt(u16, self.packet[6..8], .big);
     }
 
     pub fn flags(self: Self) IpHdrFlags {
-        return self.offset_flag() >> 13;
+        return @bitCast(@as(u3, @truncate(self.offsetFlag() >> 13)));
     }
 
     pub fn offset(self: Self) u16 {
-        return self.offset_flag() & OFFSET_MASK;
+        return self.offsetFlag() & OFFSET_MASK;
     }
 
     pub fn ttl(self: Self) u8 {
@@ -134,7 +148,7 @@ const IpHdrView = struct {
         try writer.print("        tos: 0x{x:0>2}\n", .{self.tos()});
         try writer.print("      total: {d} (payload={d})\n", .{ self.total(), self.total() - self.hlen() });
         try writer.print("         id: {d}\n", .{self.id()});
-        try writer.print("     offset: 0x{x:0>4} [flags={x}, offset={d}]\n", .{ self.offset_flag(), self.flags(), self.offset() });
+        try writer.print("     offset: 0x{x:0>4} [flags={f}, offset={d}]\n", .{ self.offsetFlag(), self.flags(), self.offset() });
         try writer.print("        ttl: {d}\n", .{self.ttl()});
         try writer.print("   protocol: {d}\n", .{self.protocol()});
         try writer.print("        sum: 0x{x:0>4}\n", .{self.sum()});
@@ -147,7 +161,7 @@ const IpHdrView = struct {
 };
 
 pub fn init() !void {
-    net.register(net.ProtocolType.IP, input) catch |err| {
+    net.register(.ip, input) catch |err| {
         util.errorf(@src(), "net.register() failure: {t}", .{err});
         return err;
     };
@@ -157,7 +171,7 @@ fn input(data: []const u8, dev: *device.Device) !void {
     util.debugf(@src(), "dev={s}, len={d}", .{ dev.name(), data.len });
     util.debugdump(data);
     const hdr = try IpHdrView.parse(data);
-    if ((hdr.flags() & @intFromEnum(IpHdrFlag.MF)) != 0 or hdr.offset() != 0) {
+    if (hdr.flags().mf or hdr.offset() != 0) {
         util.errorf(@src(), "fragments does not supported", .{});
         return error.IpFragmentedPacketNotSupported;
     }

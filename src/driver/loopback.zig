@@ -7,7 +7,7 @@ const util = @import("../util.zig");
 pub const MTU = std.math.maxInt(u16);
 
 pub fn init() !*device.Device {
-    const dev = device.Device.init(device.DeviceType.LOOPBACK, MTU, @intFromEnum(device.DeviceFlag.LOOPBACK), 0, 0, ops);
+    const dev = device.Device.init(.loopback, MTU, .{ .loopback = true }, 0, 0, ops);
     const ptr = device.register(dev) catch |err| {
         util.errorf(@src(), "device.register() failure: {t}", .{err});
         return err;

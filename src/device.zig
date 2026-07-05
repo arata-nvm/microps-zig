@@ -5,20 +5,26 @@ const net = @import("net.zig");
 const platform = @import("platform/linux/platform.zig");
 
 pub const DeviceType = enum(u16) {
-    DUMMY = 0,
-    ETHERNET = 1,
-    LOOPBACK = 2,
+    dummy = 0,
+    ethernet = 1,
+    loopback = 2,
 };
 
-pub const DeviceFlag = enum(u16) {
-    UP = 0x0001,
-    LOOPBACK = 0x0010,
-    BROADCAST = 0x0020,
-    P2P = 0x0040,
-    NEED_ARP = 0x0100,
+pub const DeviceFlags = packed struct(u16) {
+    up: bool = false,
+    _reserved1: u3 = 0,
+    loopback: bool = false,
+    broadcast: bool = false,
+    p2p: bool = false,
+    _reserved2: u1 = 0,
+    need_arp: bool = false,
+    _reserved3: u7 = 0,
+
+    pub fn format(self: @This(), writer: *std.Io.Writer) !void {
+        try writer.print("{x}", .{@as(u16, @bitCast(self))});
+    }
 };
 
-pub const DeviceFlags = u16;
 
 pub const DeviceOps = struct {
     openFn: ?*const fn (*Device) anyerror!void = null,
@@ -40,11 +46,11 @@ pub const DeviceOps = struct {
     }
 };
 
-const IFNAMSIZ = 16;
-const ADDR_LEN = 6;
-
 pub const Device = struct {
-    pub const Self = @This();
+    const Self = @This();
+
+    const IFNAMSIZ = 16;
+    const ADDR_LEN = 6;
 
     index: usize,
     name_buf: [IFNAMSIZ]u8,
@@ -85,7 +91,7 @@ pub const Device = struct {
 
     pub fn open(self: *Self) !void {
         util.infof(@src(), "dev={s}", .{self.name()});
-        if (self.is_up()) {
+        if (self.isUp()) {
             util.errorf(@src(), "already opened, dev={s}", .{self.name()});
             return error.DeviceAlreadyOpened;
         }
@@ -93,12 +99,12 @@ pub const Device = struct {
             util.errorf(@src(), "ops.open() failure, dev={s}, err={t}", .{ self.name(), err });
             return err;
         };
-        self.flags |= @intFromEnum(DeviceFlag.UP);
+        self.flags.up = true;
     }
 
     pub fn close(self: *Self) !void {
         util.infof(@src(), "dev={s}", .{self.name()});
-        if (!self.is_up()) {
+        if (!self.isUp()) {
             util.errorf(@src(), "not opened, dev={s}", .{self.name()});
             return error.DeviceNotOpened;
         }
@@ -106,13 +112,13 @@ pub const Device = struct {
             util.errorf(@src(), "ops.close() failure, dev={s}, err={t}", .{ self.name(), err });
             return err;
         };
-        self.flags &= ~@intFromEnum(DeviceFlag.UP);
+        self.flags.up = false;
     }
 
     pub fn output(self: *Self, typ: net.ProtocolType, data: []const u8) !void {
         util.debugf(@src(), "dev={s}, type={x:0>4}, len={d}", .{ self.name(), typ, data.len });
         util.debugdump(data);
-        if (!self.is_up()) {
+        if (!self.isUp()) {
             util.errorf(@src(), "not opened: dev={s}", .{self.name()});
             return error.DeviceNotOpened;
         }
@@ -130,12 +136,12 @@ pub const Device = struct {
         return self.name_buf[0..self.name_len];
     }
 
-    pub fn is_up(self: *Self) bool {
-        return (self.flags & @intFromEnum(DeviceFlag.UP)) != 0;
+    pub fn isUp(self: *const Self) bool {
+        return self.flags.up;
     }
 
-    pub fn state(self: *Self) []const u8 {
-        if (self.is_up()) {
+    pub fn state(self: *const Self) []const u8 {
+        if (self.isUp()) {
             return "UP";
         } else {
             return "DOWN";
@@ -154,7 +160,7 @@ pub fn register(dev: Device) !*Device {
 
     ptr.* = try Device.initRegistered(dev, device_index);
 
-    try devices.append(platform.allocator, ptr);
+    try devices.append(allocator, ptr);
     device_index += 1;
 
     util.infof(@src(), "success, dev={s}, index={d}", .{ ptr.name(), ptr.index });
@@ -162,6 +168,6 @@ pub fn register(dev: Device) !*Device {
     return ptr;
 }
 
-pub fn get_all() []const *Device {
+pub fn getAll() []const *Device {
     return devices.items;
 }
