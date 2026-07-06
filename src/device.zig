@@ -11,6 +11,8 @@ pub const DeviceType = enum(u16) {
 };
 
 pub const DeviceFlags = packed struct(u16) {
+    const Self = @This();
+
     up: bool = false,
     _reserved1: u3 = 0,
     loopback: bool = false,
@@ -20,7 +22,7 @@ pub const DeviceFlags = packed struct(u16) {
     need_arp: bool = false,
     _reserved3: u7 = 0,
 
-    pub fn format(self: @This(), writer: *std.Io.Writer) !void {
+    pub fn format(self: Self, writer: *std.Io.Writer) !void {
         try writer.print("{x}", .{@as(u16, @bitCast(self))});
     }
 };

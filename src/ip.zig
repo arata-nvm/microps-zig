@@ -14,12 +14,14 @@ const IP_TOTAL_SIZE_MAX = std.math.maxInt(u16);
 const IP_PAYLOAD_SIZE_MAX = IP_TOTAL_SIZE_MAX - IP_HDR_SIZE_MIN;
 
 const IpHdrFlags = packed struct(u3) {
+    const Self = @This();
+
     mf: bool = false,
     df: bool = false,
     rf: bool = false,
 
     pub fn format(
-        self: @This(),
+        self: Self,
         writer: *std.Io.Writer,
     ) !void {
         try writer.print("{x}", .{@as(u3, @bitCast(self))});
@@ -95,6 +97,10 @@ pub const IpHdr = struct {
             util.errorf(@src(), "too short, len={d}", .{packet.len});
             return error.IpPacketTooShort;
         }
+        const protocol = std.enums.fromInt(IpProtocolType, packet[9]) orelse {
+            util.errorf(@src(), "unknown protocol: {d}", .{packet[9]});
+            return error.IpUnknownProtocol;
+        };
         const self = Self{
             .version = @intCast(packet[0] >> 4),
             .hlen_4byte = @intCast(packet[0] & 0x0f),
@@ -104,7 +110,7 @@ pub const IpHdr = struct {
             .flags = @bitCast(@as(u3, @truncate(std.mem.readInt(u16, packet[6..8], .big) >> 13))),
             .offset = @intCast(std.mem.readInt(u16, packet[6..8], .big) & OFFSET_MASK),
             .ttl = packet[8],
-            .protocol = @enumFromInt(packet[9]),
+            .protocol = protocol,
             .sum = std.mem.readInt(u16, packet[10..12], .big),
             .src = IpAddr.fromBytes(@as([4]u8, packet[12..16].*)),
             .dst = IpAddr.fromBytes(@as([4]u8, packet[16..20].*)),
@@ -348,6 +354,7 @@ fn buildPacket(buf: []u8, protocol: IpProtocolType, data: []const u8, id: u16, o
         .dst = dst,
     };
     try hdr.encode(buf);
+    @memcpy(buf[hlen..total], data);
     std.debug.print("{f}", .{hdr});
     return buf[0..total];
 }
