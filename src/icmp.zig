@@ -110,7 +110,7 @@ const IcmpHdr = struct {
     pub fn format(
         self: Self,
         writer: *std.Io.Writer,
-    ) std.Io.Writer.Error!void {
+    ) !void {
         const typ: IcmpType = self.msg;
         try writer.print("       type: {d} ({t})\n", .{ typ, typ });
         try writer.print("       code: {d}\n", .{self.msg.code()});

@@ -113,8 +113,8 @@ pub const IpHdr = struct {
             .ttl = packet[8],
             .protocol = protocol,
             .sum = std.mem.readInt(u16, packet[10..12], .big),
-            .src = IpAddr.fromBytes(@as([4]u8, packet[12..16].*)),
-            .dst = IpAddr.fromBytes(@as([4]u8, packet[16..20].*)),
+            .src = IpAddr.fromBytes(packet[12..16].*),
+            .dst = IpAddr.fromBytes(packet[16..20].*),
         };
         try self.validate(packet);
         return self;
