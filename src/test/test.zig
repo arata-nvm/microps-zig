@@ -3,6 +3,7 @@ const microps = @import("microps");
 
 const device = microps.device;
 const loopback = microps.driver.loopback;
+const icmp = microps.icmp;
 const ip = microps.ip;
 const net = microps.net;
 const platform = microps.platform;
@@ -94,16 +95,19 @@ fn cleanup() !void {
 }
 
 fn appMain(io: std.Io) !void {
-    const offset = ip.IP_HDR_SIZE_MIN;
     const src = ip.IpAddr.fromString(LOOPBACK_IP_ADDR) catch |err| {
         util.errorf(@src(), "IpAddr.fromString() failure: {t}", .{err});
         return err;
     };
     const dst = src;
+    const id: u16 = @intCast(std.os.linux.getpid());
+    const data: []const u8 = "TEST";
+    var seq: u16 = 0;
 
     util.debugf(@src(), "press Ctrl+C to terminate", .{});
     while (!terminate.load(.seq_cst)) {
-        _ = ip.output(.icmp, test_data[offset..], src, dst) catch |err| {
+        seq += 1;
+        _ = icmp.output(.{ .echo = .{ .id = id, .seq = seq } }, data, src, dst) catch |err| {
             util.errorf(@src(), "ip.output() failure: {t}", .{err});
             return err;
         };

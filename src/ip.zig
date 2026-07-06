@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const device = @import("device.zig");
+const icmp = @import("icmp.zig");
 const net = @import("net.zig");
 const platform = @import("platform/linux/platform.zig");
 const util = @import("util.zig");
@@ -11,7 +12,7 @@ pub const IP_HDR_SIZE_MIN = 20;
 const IP_HDR_SIZE_MAX = 60;
 
 const IP_TOTAL_SIZE_MAX = std.math.maxInt(u16);
-const IP_PAYLOAD_SIZE_MAX = IP_TOTAL_SIZE_MAX - IP_HDR_SIZE_MIN;
+pub const IP_PAYLOAD_SIZE_MAX = IP_TOTAL_SIZE_MAX - IP_HDR_SIZE_MIN;
 
 const IpHdrFlags = packed struct(u3) {
     const Self = @This();
@@ -277,6 +278,10 @@ fn input(data: []const u8, dev: *device.Device) !void {
         }
     }
     // unsupported protocol
+    if (hdr.hlen() + 8 <= hdr.total) {
+        // It should not be sent in response to ICMP error messages, but ICMP is always registered and will not reach this point.
+        _ = try icmp.output(.{ .dest_unreachable = .{ .code = .protocol_unreachable } }, data[0 .. hdr.hlen() + 8], iface.unicast, hdr.src);
+    }
 }
 
 pub fn output(protocol: IpProtocolType, data: []const u8, src: IpAddr, dst: IpAddr) !usize {
