@@ -103,7 +103,7 @@ fn appMain(io: std.Io) !void {
 
     util.debugf(@src(), "press Ctrl+C to terminate", .{});
     while (!terminate.load(.seq_cst)) {
-        _ = ip.output(1, test_data[offset..], src, dst) catch |err| {
+        _ = ip.output(.icmp, test_data[offset..], src, dst) catch |err| {
             util.errorf(@src(), "ip.output() failure: {t}", .{err});
             return err;
         };

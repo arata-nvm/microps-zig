@@ -2,6 +2,7 @@ const std = @import("std");
 
 const platform = @import("platform/linux/platform.zig");
 const device = @import("device.zig");
+const icmp = @import("icmp.zig");
 const ip = @import("ip.zig");
 const util = @import("util.zig");
 
@@ -23,7 +24,7 @@ var protocols: std.ArrayList(*Protocol) = .empty;
 pub fn register(typ: ProtocolType, handler: ProtocolHandler) !void {
     for (protocols.items) |proto| {
         if (proto.type == typ) {
-            util.errorf(@src(), "already registered, type={x:0>4}", .{typ});
+            util.errorf(@src(), "already registered, type={t}", .{typ});
             return error.ProtocolAlreadyRegistered;
         }
     }
@@ -36,7 +37,7 @@ pub fn register(typ: ProtocolType, handler: ProtocolHandler) !void {
     proto.handler = handler;
     try protocols.append(allocator, proto);
 
-    util.infof(@src(), "success, type={x:0>4}", .{typ});
+    util.infof(@src(), "success, type={t}", .{typ});
 }
 
 pub fn input(typ: ProtocolType, data: []const u8, dev: *device.Device) !void {
@@ -59,6 +60,10 @@ pub fn init() !void {
     };
     ip.init() catch |err| {
         util.errorf(@src(), "ip.init() failure: {t}", .{err});
+        return err;
+    };
+    icmp.init() catch |err| {
+        util.errorf(@src(), "icmp.init() failure: {t}", .{err});
         return err;
     };
     util.infof(@src(), "success", .{});

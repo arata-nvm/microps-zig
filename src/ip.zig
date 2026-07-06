@@ -69,7 +69,7 @@ pub const IpAddr = struct {
     }
 };
 
-const IpHdr = struct {
+pub const IpHdr = struct {
     const Self = @This();
     const OFFSET_MASK = 0x1fff;
 
@@ -81,7 +81,7 @@ const IpHdr = struct {
     flags: IpHdrFlags,
     offset: u13,
     ttl: u8,
-    protocol: u8,
+    protocol: IpProtocolType,
     sum: u16,
     src: IpAddr,
     dst: IpAddr,
@@ -104,7 +104,7 @@ const IpHdr = struct {
             .flags = @bitCast(@as(u3, @truncate(std.mem.readInt(u16, packet[6..8], .big) >> 13))),
             .offset = @intCast(std.mem.readInt(u16, packet[6..8], .big) & OFFSET_MASK),
             .ttl = packet[8],
-            .protocol = packet[9],
+            .protocol = @enumFromInt(packet[9]),
             .sum = std.mem.readInt(u16, packet[10..12], .big),
             .src = IpAddr.fromBytes(@as([4]u8, packet[12..16].*)),
             .dst = IpAddr.fromBytes(@as([4]u8, packet[16..20].*)),
@@ -148,7 +148,7 @@ const IpHdr = struct {
         std.mem.writeInt(u16, buf[4..6], self.id, .big);
         std.mem.writeInt(u16, buf[6..8], (@as(u16, @as(u3, @bitCast(self.flags))) << 13) | self.offset, .big);
         buf[8] = self.ttl;
-        buf[9] = self.protocol;
+        buf[9] = @intFromEnum(self.protocol);
         std.mem.writeInt(u16, buf[10..12], 0, .big);
         std.mem.writeInt(u32, buf[12..16], self.src.addr, .big);
         std.mem.writeInt(u32, buf[16..20], self.dst.addr, .big);
@@ -164,7 +164,7 @@ const IpHdr = struct {
         try writer.print("         id: {d}\n", .{self.id});
         try writer.print("     offset: [flags={f}, offset={d}]\n", .{ self.flags, self.offset });
         try writer.print("        ttl: {d}\n", .{self.ttl});
-        try writer.print("   protocol: {d}\n", .{self.protocol});
+        try writer.print("   protocol: {t}\n", .{self.protocol});
         try writer.print("        sum: 0x{x:0>4}\n", .{self.sum});
         try writer.print("        src: {f}\n", .{self.src});
         try writer.print("        dst: {f}\n", .{self.dst});
@@ -201,13 +201,49 @@ pub const IpIface = struct {
     }
 };
 
+const IpProtocolType = enum(u8) {
+    icmp = 1,
+    tcp = 6,
+    udp = 17,
+};
+
+const IpProtocolHandler = *const fn (hdr: *const IpHdr, data: []const u8, iface: *IpIface) anyerror!void;
+
+const IpProtocol = struct { type: IpProtocolType, handler: IpProtocolHandler };
+
 var ifaces: std.ArrayList(*IpIface) = .empty;
+var protocols: std.ArrayList(*IpProtocol) = .empty;
 
 pub fn init() !void {
     net.register(.ip, input) catch |err| {
         util.errorf(@src(), "net.register() failure: {t}", .{err});
         return err;
     };
+}
+
+pub fn registerIface(dev: *device.Device, iface: *IpIface) !void {
+    const allocator = platform.allocator;
+    try dev.addIface(&iface.iface);
+    try ifaces.append(allocator, iface);
+}
+
+pub fn registerProtocol(typ: IpProtocolType, handler: IpProtocolHandler) !void {
+    for (protocols.items) |proto| {
+        if (proto.type == typ) {
+            util.errorf(@src(), "already registered, type={t}", .{typ});
+            return error.IpProtocolAlreadyRegistered;
+        }
+    }
+
+    const allocator = platform.allocator;
+    const proto = try allocator.create(IpProtocol);
+    errdefer allocator.destroy(proto);
+
+    proto.type = typ;
+    proto.handler = handler;
+    try protocols.append(allocator, proto);
+
+    util.infof(@src(), "success, type={t}", .{typ});
 }
 
 fn input(data: []const u8, dev: *device.Device) !void {
@@ -228,15 +264,16 @@ fn input(data: []const u8, dev: *device.Device) !void {
     }
     util.debugf(@src(), "permit, dev={s}, iface={f}", .{ dev.name(), iface.unicast });
     std.debug.print("{f}", .{hdr});
+    for (protocols.items) |proto| {
+        if (proto.type == @as(IpProtocolType, hdr.protocol)) {
+            try proto.handler(&hdr, data[hdr.hlen()..], iface);
+            return;
+        }
+    }
+    // unsupported protocol
 }
 
-pub fn registerIface(dev: *device.Device, iface: *IpIface) !void {
-    const allocator = platform.allocator;
-    try dev.addIface(&iface.iface);
-    try ifaces.append(allocator, iface);
-}
-
-pub fn output(protocol: u8, data: []const u8, src: IpAddr, dst: IpAddr) !usize {
+pub fn output(protocol: IpProtocolType, data: []const u8, src: IpAddr, dst: IpAddr) !usize {
     util.debugf(@src(), "{f} => {f}, protocol={d}, len={d}", .{ src, dst, protocol, data.len });
     if (src.eql(IpAddr.any)) {
         util.errorf(@src(), "ip routing not implemented", .{});
@@ -290,7 +327,7 @@ fn outputDevice(iface: *IpIface, data: []const u8, target: IpAddr) !void {
     return iface.dev().output(.ip, data);
 }
 
-fn buildPacket(buf: []u8, protocol: u8, data: []const u8, id: u16, offset: u13, src: IpAddr, dst: IpAddr) ![]const u8 {
+fn buildPacket(buf: []u8, protocol: IpProtocolType, data: []const u8, id: u16, offset: u13, src: IpAddr, dst: IpAddr) ![]const u8 {
     const hlen = IP_HDR_SIZE_MIN;
     const total = hlen + data.len;
     if (buf.len < total) {
