@@ -84,7 +84,7 @@ pub const IpHdr = struct {
     offset: u13,
     ttl: u8,
     protocol: IpProtocolType,
-    sum: u16,
+    sum: u16 = 0,
     src: IpAddr,
     dst: IpAddr,
 
@@ -299,10 +299,8 @@ pub fn output(protocol: IpProtocolType, data: []const u8, src: IpAddr, dst: IpAd
     }
 
     const id = platform.random16();
-    const allocator = platform.allocator;
-    const buf = try allocator.alloc(u8, IP_TOTAL_SIZE_MAX);
-    defer allocator.free(buf);
-    const packet = buildPacket(buf, protocol, data, id, 0, iface.unicast, dst) catch |err| {
+    var buf: [IP_TOTAL_SIZE_MAX]u8 = undefined;
+    const packet = buildPacket(&buf, protocol, data, id, 0, iface.unicast, dst) catch |err| {
         util.errorf(@src(), "buildPacket() failure: {t}", .{err});
         return err;
     };
@@ -349,7 +347,6 @@ fn buildPacket(buf: []u8, protocol: IpProtocolType, data: []const u8, id: u16, o
         .offset = offset,
         .ttl = 0xff,
         .protocol = protocol,
-        .sum = 0,
         .src = src,
         .dst = dst,
     };
