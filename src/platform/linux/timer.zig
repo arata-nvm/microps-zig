@@ -63,7 +63,7 @@ fn timerIrqHandler(irq: u32, arg: ?*anyopaque) void {
 pub fn init() !void {
     var sev: sigevent = .{
         .value = .{ .ptr = @ptrCast(&timerid) },
-        .signo = @intCast(intr.IRQ_TIMER),
+        .signo = @intCast(intr.irq_timer),
         .notify = SIGEV_SIGNAL,
         ._pad = @splat(0),
     };
@@ -71,7 +71,7 @@ pub fn init() !void {
         util.errorf(@src(), "timer_create: failure", .{});
         return error.TimerCreateFailure;
     }
-    try intr.register(intr.IRQ_TIMER, timerIrqHandler, 0, null);
+    try intr.register(intr.irq_timer, timerIrqHandler, .{}, null);
 }
 
 pub fn run() !void {

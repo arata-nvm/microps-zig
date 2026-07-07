@@ -4,7 +4,7 @@ const ip = @import("ip.zig");
 const platform = @import("platform/linux/platform.zig");
 const util = @import("util.zig");
 
-const ICMP_BUFSIZ = ip.IP_PAYLOAD_SIZE_MAX;
+const buf_size = ip.payload_size_max;
 
 pub const IcmpType = enum(u8) {
     echo_reply = 0,
@@ -43,13 +43,14 @@ const IcmpMessage = union(IcmpType) {
 
 const IcmpHdr = struct {
     const Self = @This();
-    const HDR_SIZE_MIN = 8;
+
+    const size_min = 8;
 
     sum: u16 = 0,
     msg: IcmpMessage,
 
     pub fn decode(data: []const u8) !Self {
-        if (data.len < HDR_SIZE_MIN) {
+        if (data.len < size_min) {
             util.errorf(@src(), "too short", .{});
             return error.IpPacketTooShort;
         }
@@ -82,7 +83,7 @@ const IcmpHdr = struct {
     }
 
     pub fn encode(self: *Self, buf: []u8, payload: []const u8) ![]const u8 {
-        const msg_size = IcmpHdr.HDR_SIZE_MIN + payload.len;
+        const msg_size = IcmpHdr.size_min + payload.len;
         if (buf.len < msg_size) {
             util.errorf(@src(), "buffer too short: len={d} < msg_size={d}", .{ buf.len, msg_size });
             return error.IpBufferTooShort;
@@ -100,7 +101,7 @@ const IcmpHdr = struct {
                 std.mem.writeInt(u32, buf[4..8], msg.unused, .big);
             },
         }
-        @memcpy(buf[IcmpHdr.HDR_SIZE_MIN..msg_size], payload);
+        @memcpy(buf[IcmpHdr.size_min..msg_size], payload);
 
         self.sum = util.cksum16(buf[0..msg_size], 0);
         std.mem.writeInt(u16, buf[2..4], self.sum, .big);
@@ -141,7 +142,7 @@ fn input(ip_hdr: *const ip.IpHdr, data: []const u8, iface: *ip.IpIface) !void {
     switch (icmp_hdr.msg) {
         .echo => |msg| {
             // Responds with the address of the received interface.
-            _ = try output(.{ .echo_reply = msg }, data[IcmpHdr.HDR_SIZE_MIN..], iface.unicast, ip_hdr.src);
+            _ = try output(.{ .echo_reply = msg }, data[IcmpHdr.size_min..], iface.unicast, ip_hdr.src);
         },
         else => {
             // ignore
@@ -150,7 +151,7 @@ fn input(ip_hdr: *const ip.IpHdr, data: []const u8, iface: *ip.IpIface) !void {
 }
 
 pub fn output(msg: IcmpMessage, data: []const u8, src: ip.IpAddr, dst: ip.IpAddr) !usize {
-    var buf: [ICMP_BUFSIZ]u8 = undefined;
+    var buf: [buf_size]u8 = undefined;
     var hdr = IcmpHdr{ .msg = msg };
     const packet = hdr.encode(&buf, data) catch |err| {
         util.errorf(@src(), "IcmpHdr.encode() failure: err={t}", .{err});

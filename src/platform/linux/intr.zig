@@ -3,52 +3,53 @@ const std = @import("std");
 const platform = @import("platform.zig");
 const util = @import("../../util.zig");
 
-pub const IRQ_SOFT: u32 = @intFromEnum(std.c.SIG.USR1);
-pub const IRQ_USER: u32 = @intFromEnum(std.c.SIG.USR2);
-pub const IRQ_TIMER: u32 = @intFromEnum(std.c.SIG.ALRM);
+pub const irq_soft: u32 = @intFromEnum(std.c.SIG.USR1);
+pub const irq_user: u32 = @intFromEnum(std.c.SIG.USR2);
+pub const irq_timer: u32 = @intFromEnum(std.c.SIG.ALRM);
 
 pub fn irqBase() u32 {
     return @as(u32, std.c.sigrtmin()) + 1;
 }
 
-pub const IRQ_SHARED: u32 = 0x0001;
-
 pub const Isr = *const fn (irq: u32, arg: ?*anyopaque) void;
 
+pub const IrqFlags = struct {
+    shared: bool = false,
+};
+
 const IrqEntry = struct {
-    next: ?*IrqEntry,
     irq: u32,
     isr: Isr,
-    flags: u32,
+    flags: IrqFlags,
     arg: ?*anyopaque,
 };
 
 /// NOTE: if you want to add/delete the entries after run(), you need to protect these lists with a mutex.
-var irqs: ?*IrqEntry = null;
+var irqs: std.ArrayList(*IrqEntry) = .empty;
 
 var thread: ?std.Thread = null;
 var barrier: std.c.sem_t = undefined;
 var sigmask: std.c.sigset_t = undefined;
 
-pub fn register(irq: u32, isr: Isr, flags: u32, arg: ?*anyopaque) !void {
-    var entry = irqs;
-    while (entry) |e| : (entry = e.next) {
+pub fn register(irq: u32, isr: Isr, flags: IrqFlags, arg: ?*anyopaque) !void {
+    for (irqs.items) |e| {
         if (e.irq == irq) {
-            if (e.flags != IRQ_SHARED or flags != IRQ_SHARED) {
+            if (!e.flags.shared or !flags.shared) {
                 util.errorf(@src(), "conflicts with already registered IRQs, irq={d}", .{irq});
                 return error.IrqConflict;
             }
         }
     }
-    const new = try platform.allocator.create(IrqEntry);
+
+    const allocator = platform.allocator;
+    const new = try allocator.create(IrqEntry);
     new.* = .{
-        .next = irqs,
         .irq = irq,
         .isr = isr,
         .flags = flags,
         .arg = arg,
     };
-    irqs = new;
+    try irqs.append(allocator, new);
     std.posix.sigaddset(&sigmask, @enumFromInt(irq));
     util.infof(@src(), "success, irq={d}", .{irq});
 }
@@ -76,14 +77,13 @@ fn intrMain() void {
             continue;
         }
         const irq: u32 = @intCast(sig);
-        if (irq != IRQ_TIMER) {
+        if (irq != irq_timer) {
             util.debugf(@src(), "IRQ <{d}> occurred", .{irq});
         }
-        var entry = irqs;
-        while (entry) |e| : (entry = e.next) {
+        for (irqs.items) |e| {
             if (e.irq == irq) {
                 e.isr(e.irq, e.arg);
-                if (e.flags != IRQ_SHARED) {
+                if (!e.flags.shared) {
                     break;
                 }
             }
@@ -132,7 +132,7 @@ test "raise and dispatch" {
     };
 
     try init();
-    try register(irqBase(), Context.isr, 0, null);
+    try register(irqBase(), Context.isr, .{}, null);
     try run();
     try raise(irqBase());
     var retry: usize = 0;

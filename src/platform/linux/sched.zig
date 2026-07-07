@@ -91,7 +91,7 @@ fn schedIrqHandler(irq: u32, arg: ?*anyopaque) void {
 }
 
 pub fn init() !void {
-    try intr.register(intr.IRQ_USER, schedIrqHandler, 0, null);
+    try intr.register(intr.irq_user, schedIrqHandler, 0, null);
 }
 
 pub fn run() !void {

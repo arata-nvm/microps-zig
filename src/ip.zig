@@ -6,13 +6,10 @@ const net = @import("net.zig");
 const platform = @import("platform/linux/platform.zig");
 const util = @import("util.zig");
 
-const IP_VERSION_V4 = 4;
+const version_v4 = 4;
 
-pub const IP_HDR_SIZE_MIN = 20;
-const IP_HDR_SIZE_MAX = 60;
-
-const IP_TOTAL_SIZE_MAX = std.math.maxInt(u16);
-pub const IP_PAYLOAD_SIZE_MAX = IP_TOTAL_SIZE_MAX - IP_HDR_SIZE_MIN;
+const total_size_max = std.math.maxInt(u16);
+pub const payload_size_max = total_size_max - IpHdr.size_min;
 
 const IpHdrFlags = packed struct(u3) {
     const Self = @This();
@@ -32,14 +29,14 @@ const IpHdrFlags = packed struct(u3) {
 pub const IpAddr = struct {
     const Self = @This();
 
-    pub const LEN = 4;
+    pub const len = 4;
 
     addr: u32,
 
     pub const any = IpAddr{ .addr = 0x00000000 };
     pub const broadcast = IpAddr{ .addr = 0xffffffff };
 
-    pub fn fromBytes(bytes: [LEN]u8) IpAddr {
+    pub fn fromBytes(bytes: [len]u8) IpAddr {
         return IpAddr{ .addr = std.mem.readInt(u32, bytes[0..], .big) };
     }
 
@@ -74,7 +71,10 @@ pub const IpAddr = struct {
 
 pub const IpHdr = struct {
     const Self = @This();
-    const OFFSET_MASK = 0x1fff;
+
+    pub const size_min = 20;
+    const size_max = 60;
+    const offset_mask = 0x1fff;
 
     version: u4,
     hlen_4byte: u4,
@@ -94,7 +94,7 @@ pub const IpHdr = struct {
     }
 
     pub fn decode(packet: []const u8) !Self {
-        if (packet.len < IP_HDR_SIZE_MIN) {
+        if (packet.len < size_min) {
             util.errorf(@src(), "too short, len={d}", .{packet.len});
             return error.IpPacketTooShort;
         }
@@ -109,7 +109,7 @@ pub const IpHdr = struct {
             .total = std.mem.readInt(u16, packet[2..4], .big),
             .id = std.mem.readInt(u16, packet[4..6], .big),
             .flags = @bitCast(@as(u3, @truncate(std.mem.readInt(u16, packet[6..8], .big) >> 13))),
-            .offset = @intCast(std.mem.readInt(u16, packet[6..8], .big) & OFFSET_MASK),
+            .offset = @intCast(std.mem.readInt(u16, packet[6..8], .big) & offset_mask),
             .ttl = packet[8],
             .protocol = protocol,
             .sum = std.mem.readInt(u16, packet[10..12], .big),
@@ -121,7 +121,7 @@ pub const IpHdr = struct {
     }
 
     fn validate(self: Self, packet: []const u8) !void {
-        if (self.version != IP_VERSION_V4) {
+        if (self.version != version_v4) {
             util.errorf(@src(), "ip version error, v={d}", .{self.version});
             return error.IpVersionError;
         }
@@ -159,7 +159,7 @@ pub const IpHdr = struct {
         std.mem.writeInt(u16, buf[10..12], 0, .big);
         std.mem.writeInt(u32, buf[12..16], self.src.addr, .big);
         std.mem.writeInt(u32, buf[16..20], self.dst.addr, .big);
-        std.debug.assert(self.hlen() == IP_HDR_SIZE_MIN);
+        std.debug.assert(self.hlen() == size_min);
         self.sum = util.cksum16(buf[0..self.hlen()], 0);
         std.mem.writeInt(u16, buf[10..12], self.sum, .big);
     }
@@ -298,13 +298,13 @@ pub fn output(protocol: IpProtocolType, data: []const u8, src: IpAddr, dst: IpAd
         util.errorf(@src(), "not reached, dst={f}", .{dst});
         return error.IpNotReached;
     }
-    if (iface.dev().mtu < IP_HDR_SIZE_MIN + data.len) {
-        util.errorf(@src(), "too long, dev={s}, mtu={d} < len={d}", .{ iface.dev().name(), iface.dev().mtu, IP_HDR_SIZE_MIN + data.len });
+    if (iface.dev().mtu < IpHdr.size_min + data.len) {
+        util.errorf(@src(), "too long, dev={s}, mtu={d} < len={d}", .{ iface.dev().name(), iface.dev().mtu, IpHdr.size_min + data.len });
         return error.IpPayloadTooLarge;
     }
 
     const id = platform.random16();
-    var buf: [IP_TOTAL_SIZE_MAX]u8 = undefined;
+    var buf: [total_size_max]u8 = undefined;
     const packet = buildPacket(&buf, protocol, data, id, 0, iface.unicast, dst) catch |err| {
         util.errorf(@src(), "buildPacket() failure: {t}", .{err});
         return err;
@@ -337,13 +337,13 @@ fn outputDevice(iface: *IpIface, data: []const u8, target: IpAddr) !void {
 }
 
 fn buildPacket(buf: []u8, protocol: IpProtocolType, data: []const u8, id: u16, offset: u13, src: IpAddr, dst: IpAddr) ![]const u8 {
-    const hlen = IP_HDR_SIZE_MIN;
+    const hlen = IpHdr.size_min;
     const total = hlen + data.len;
     if (buf.len < total) {
         return error.IpBufferTooShort;
     }
     var hdr = IpHdr{
-        .version = IP_VERSION_V4,
+        .version = version_v4,
         .hlen_4byte = hlen >> 2,
         .tos = 0,
         .total = @intCast(total),
@@ -377,7 +377,7 @@ test "IpHdr round-trip" {
         0x26, 0x2a, 0x28, 0x29,
     };
     var hdr = try IpHdr.decode(&packet);
-    var buf: [IP_HDR_SIZE_MIN]u8 = undefined;
+    var buf: [IpHdr.size_min]u8 = undefined;
     try hdr.encode(&buf);
-    try std.testing.expectEqualSlices(u8, packet[0..IP_HDR_SIZE_MIN], &buf);
+    try std.testing.expectEqualSlices(u8, packet[0..IpHdr.size_min], &buf);
 }

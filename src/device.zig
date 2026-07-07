@@ -60,19 +60,19 @@ pub const DeviceOps = struct {
 pub const Device = struct {
     const Self = @This();
 
-    const IFNAMSIZ = 16;
-    const ADDR_LEN = 6;
+    const ifname_size = 16;
+    const addr_len = 6;
 
     index: usize,
-    name_buf: [IFNAMSIZ]u8,
+    name_buf: [ifname_size]u8,
     name_len: usize,
     type: DeviceType,
     mtu: u16,
     flags: DeviceFlags,
     hlen: u16,
     alen: u16,
-    addr: [ADDR_LEN]u8,
-    broadcast: [ADDR_LEN]u8,
+    addr: [addr_len]u8,
+    broadcast: [addr_len]u8,
 
     ops: DeviceOps,
     ifaces: std.ArrayList(*Iface) = .empty,
@@ -80,7 +80,7 @@ pub const Device = struct {
     pub fn init(typ: DeviceType, mtu: u16, flags: DeviceFlags, hlen: u16, alen: u16, ops: DeviceOps) Self {
         return Self{
             .index = 0,
-            .name_buf = [_]u8{0} ** IFNAMSIZ,
+            .name_buf = [_]u8{0} ** ifname_size,
             .name_len = 0,
             .type = typ,
             .mtu = mtu,

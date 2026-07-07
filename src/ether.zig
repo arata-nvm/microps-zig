@@ -5,14 +5,14 @@ const util = @import("util.zig");
 pub const EtherAddr = struct {
     const Self = @This();
 
-    const ADDR_LEN = 6;
+    const len = 6;
 
-    addr: [ADDR_LEN]u8,
+    addr: [len]u8,
 
     pub const any = Self{ .addr = [_]u8{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 } };
     pub const broadcast = Self{ .addr = [_]u8{ 0xff, 0xff, 0xff, 0xff, 0xff, 0xff } };
 
-    pub fn fromBytes(bytes: [ADDR_LEN]u8) Self {
+    pub fn fromBytes(bytes: [len]u8) Self {
         return Self{ .addr = bytes };
     }
 
@@ -40,14 +40,14 @@ pub const EtherType = enum(u16) {
 pub const EtherHdr = struct {
     const Self = @This();
 
-    const HDR_SIZE_MIN = 14;
+    const size_min = 14;
 
     src: EtherAddr,
     dst: EtherAddr,
     type: EtherType,
 
     pub fn decode(data: []const u8) !Self {
-        if (data.len < HDR_SIZE_MIN) {
+        if (data.len < size_min) {
             util.errorf(@src(), "too short", .{});
             return error.EtherPacketTooShort;
         }
