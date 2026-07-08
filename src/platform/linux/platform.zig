@@ -8,14 +8,17 @@ pub const ether_tap = @import("driver/ether_tap.zig");
 
 pub fn init() !void {
     try intr.init();
+    try timer.init();
 }
 
 pub fn run() !void {
     try intr.run();
+    try timer.run();
 }
 
 pub fn shutdown() !void {
     try intr.shutdown();
+    try timer.shutdown();
 }
 
 pub const allocator = std.heap.c_allocator;

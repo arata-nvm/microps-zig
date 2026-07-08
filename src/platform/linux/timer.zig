@@ -20,7 +20,6 @@ extern "c" fn timer_settime(timerid: timer_t, flags: c_int, new_value: *const st
 extern "c" fn timer_delete(timerid: timer_t) c_int;
 
 const Timer = struct {
-    next: ?*Timer,
     interval: std.c.timeval,
     last: std.c.timeval,
     handler: *const fn () void,
@@ -29,19 +28,19 @@ const Timer = struct {
 var timerid: timer_t = undefined;
 
 /// NOTE: if you want to add/delete the entries after timer_run(), you need to protect these lists with a mutex.
-var timers: ?*Timer = null;
+var timers: std.ArrayList(*Timer) = .empty;
 
 pub fn register(interval: std.c.timeval, handler: *const fn () void) !void {
-    const timer = try platform.allocator.create(Timer);
+    const allocator = platform.allocator;
+    const timer = try allocator.create(Timer);
     var last: std.c.timeval = undefined;
     _ = std.c.gettimeofday(&last, null);
     timer.* = .{
-        .next = timers,
         .interval = interval,
         .last = last,
         .handler = handler,
     };
-    timers = timer;
+    try timers.append(allocator, timer);
     util.infof(@src(), "success, interval={{{d}, {d}}}", .{ interval.sec, interval.usec });
 }
 
@@ -50,8 +49,7 @@ fn timerIrqHandler(irq: u32, arg: ?*anyopaque) !void {
     _ = arg;
     var now: std.c.timeval = undefined;
     _ = std.c.gettimeofday(&now, null);
-    var timer = timers;
-    while (timer) |t| : (timer = t.next) {
+    for (timers.items) |t| {
         const diff = util.timevalSub(now, t.last);
         if (util.timevalCmp(t.interval, diff) < 0) {
             t.handler();

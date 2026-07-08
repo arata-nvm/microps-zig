@@ -38,6 +38,12 @@ pub fn timevalCmp(a: std.c.timeval, b: std.c.timeval) i2 {
     return 0;
 }
 
+pub fn timevalNow() std.c.timeval {
+    var tv: std.c.timeval = undefined;
+    _ = std.c.gettimeofday(&tv, null);
+    return tv;
+}
+
 const Tm = extern struct {
     sec: c_int,
     min: c_int,
@@ -54,8 +60,7 @@ const Tm = extern struct {
 extern "c" fn localtime_r(timep: *const std.c.time_t, result: *Tm) ?*Tm;
 
 pub fn logf(level: u8, src: std.builtin.SourceLocation, comptime fmt: []const u8, args: anytype) void {
-    var tv: std.c.timeval = undefined;
-    _ = std.c.gettimeofday(&tv, null);
+    const tv = timevalNow();
     const sec: std.c.time_t = @intCast(tv.sec);
     var tm: Tm = undefined;
     _ = localtime_r(&sec, &tm);
