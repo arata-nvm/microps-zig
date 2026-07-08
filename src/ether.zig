@@ -2,10 +2,15 @@ const std = @import("std");
 
 const util = @import("util.zig");
 
+pub const frame_min = 60;
+pub const frame_max = 1514;
+pub const payload_size_min = frame_min - EtherHdr.size;
+pub const payload_size_max = frame_max - EtherHdr.size;
+
 pub const EtherAddr = struct {
     const Self = @This();
 
-    const len = 6;
+    pub const len = 6;
 
     addr: [len]u8,
 
@@ -14,6 +19,25 @@ pub const EtherAddr = struct {
 
     pub fn fromBytes(bytes: [len]u8) Self {
         return Self{ .addr = bytes };
+    }
+
+    pub fn toBytes(self: @This()) [len]u8 {
+        return self.addr;
+    }
+
+    pub fn fromString(s: []const u8) !Self {
+        var parts: [len]u8 = undefined;
+        var it = std.mem.splitScalar(u8, s, ':');
+        for (&parts) |*p| {
+            const tok = it.next() orelse return error.EtherAddrParseError;
+            p.* = std.fmt.parseInt(u8, tok, 16) catch return error.EtherAddrParseError;
+        }
+        if (it.next() != null) return error.EtherAddrParseError;
+        return fromBytes(parts);
+    }
+
+    pub fn eql(self: Self, other: Self) bool {
+        return std.mem.eql(u8, self.addr[0..], other.addr[0..]);
     }
 
     pub fn format(
@@ -40,19 +64,24 @@ pub const EtherType = enum(u16) {
 pub const EtherHdr = struct {
     const Self = @This();
 
-    const size_min = 14;
+    pub const size = 14;
 
     src: EtherAddr,
     dst: EtherAddr,
     type: EtherType,
 
-    pub fn decode(data: []const u8) !Self {
-        if (data.len < size_min) {
+    pub const Decoded = struct {
+        hdr: Self,
+        payload: []const u8,
+    };
+
+    pub fn decode(data: []const u8) !Decoded {
+        if (data.len < size) {
             util.errorf(@src(), "too short", .{});
             return error.EtherPacketTooShort;
         }
         const type_int = std.mem.readInt(u16, data[12..14], .big);
-        return Self{
+        const hdr = Self{
             .src = EtherAddr.fromBytes(data[6..12].*),
             .dst = EtherAddr.fromBytes(data[0..6].*),
             .type = std.enums.fromInt(EtherType, type_int) orelse {
@@ -60,6 +89,22 @@ pub const EtherHdr = struct {
                 return error.EtherUnknownType;
             },
         };
+        return .{
+            .hdr = hdr,
+            .payload = data[size..],
+        };
+    }
+
+    pub fn encode(self: Self, buf: []u8) !usize {
+        if (buf.len < size) {
+            util.errorf(@src(), "buffer too short: len={d} < {d}", .{ buf.len, size });
+            return error.EtherBufferTooShort;
+        }
+
+        buf[0..6].* = self.dst.toBytes();
+        buf[6..12].* = self.src.toBytes();
+        std.mem.writeInt(u16, buf[12..14], @intFromEnum(self.type), .big);
+        return size;
     }
 
     pub fn format(

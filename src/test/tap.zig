@@ -53,10 +53,10 @@ pub fn main(init: std.process.Init) !void {
             return err;
         };
         util.infof(@src(), "receive {d} bytes data", .{n});
-        const hdr = ether.EtherHdr.decode(buf[0..n]) catch {
+        const d = ether.EtherHdr.decode(buf[0..n]) catch {
             continue;
         };
-        std.debug.print("{f}", .{hdr});
+        std.debug.print("{f}", .{d.hdr});
         util.debugdump(buf[0..n]);
     }
 }

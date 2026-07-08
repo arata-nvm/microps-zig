@@ -45,7 +45,7 @@ pub fn register(interval: std.c.timeval, handler: *const fn () void) !void {
     util.infof(@src(), "success, interval={{{d}, {d}}}", .{ interval.sec, interval.usec });
 }
 
-fn timerIrqHandler(irq: u32, arg: ?*anyopaque) void {
+fn timerIrqHandler(irq: u32, arg: ?*anyopaque) !void {
     _ = irq;
     _ = arg;
     var now: std.c.timeval = undefined;

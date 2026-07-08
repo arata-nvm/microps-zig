@@ -6,11 +6,8 @@ const icmp = @import("icmp.zig");
 const ip = @import("ip.zig");
 const util = @import("util.zig");
 
-pub const ProtocolType = enum(u16) {
-    ip = 0x0800,
-    arp = 0x0806,
-    ipv6 = 0x86dd,
-};
+// TODO: etherの具体的な実装に依存してしまっているので、分離できると好ましい
+pub const ProtocolType = @import("ether.zig").EtherType;
 
 pub const ProtocolHandler = *const fn (data: []const u8, dev: *device.Device) anyerror!void;
 

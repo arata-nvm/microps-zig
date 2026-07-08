@@ -4,11 +4,19 @@ pub const intr = @import("intr.zig");
 pub const timer = @import("timer.zig");
 pub const sched = @import("sched.zig");
 
-pub fn init() !void {}
+pub const ether_tap = @import("driver/ether_tap.zig");
 
-pub fn run() !void {}
+pub fn init() !void {
+    try intr.init();
+}
 
-pub fn shutdown() !void {}
+pub fn run() !void {
+    try intr.run();
+}
+
+pub fn shutdown() !void {
+    try intr.shutdown();
+}
 
 pub const allocator = std.heap.c_allocator;
 

@@ -40,7 +40,7 @@ pub const Iface = struct {
 pub const DeviceOps = struct {
     openFn: ?*const fn (*Device) anyerror!void = null,
     closeFn: ?*const fn (*Device) anyerror!void = null,
-    outputFn: *const fn (*Device, net.ProtocolType, []const u8) anyerror!void,
+    outputFn: *const fn (*Device, net.ProtocolType, []const u8, ?[]const u8) anyerror!void,
 
     pub fn open(self: DeviceOps, dev: *Device) !void {
         const f = self.openFn orelse return;
@@ -52,16 +52,16 @@ pub const DeviceOps = struct {
         return f(dev);
     }
 
-    pub fn output(self: DeviceOps, dev: *Device, typ: net.ProtocolType, data: []const u8) !void {
-        return self.outputFn(dev, typ, data);
+    pub fn output(self: DeviceOps, dev: *Device, typ: net.ProtocolType, data: []const u8, dst: ?[]const u8) !void {
+        return self.outputFn(dev, typ, data, dst);
     }
 };
 
 pub const Device = struct {
     const Self = @This();
 
-    const ifname_size = 16;
-    const addr_len = 6;
+    pub const ifname_size = 16;
+    pub const addr_len = 16;
 
     index: usize,
     name_buf: [ifname_size]u8,
@@ -80,7 +80,7 @@ pub const Device = struct {
     pub fn init(typ: DeviceType, mtu: u16, flags: DeviceFlags, hlen: u16, alen: u16, ops: DeviceOps) Self {
         return Self{
             .index = 0,
-            .name_buf = [_]u8{0} ** ifname_size,
+            .name_buf = std.mem.zeroes([ifname_size]u8),
             .name_len = 0,
             .type = typ,
             .mtu = mtu,
@@ -91,14 +91,6 @@ pub const Device = struct {
             .broadcast = undefined,
             .ops = ops,
         };
-    }
-
-    fn initRegistered(dev: Device, index: usize) !Device {
-        var result = dev;
-        result.index = index;
-        const name_buf = try std.fmt.bufPrint(&result.name_buf, "net{d}", .{index});
-        result.name_len = name_buf.len;
-        return result;
     }
 
     pub fn open(self: *Self) !void {
@@ -127,7 +119,7 @@ pub const Device = struct {
         self.flags.up = false;
     }
 
-    pub fn output(self: *Self, typ: net.ProtocolType, data: []const u8) !void {
+    pub fn output(self: *Self, typ: net.ProtocolType, data: []const u8, dst: ?[]const u8) !void {
         util.debugf(@src(), "dev={s}, type={x:0>4}, len={d}", .{ self.name(), typ, data.len });
         util.debugdump(data);
         if (!self.isUp()) {
@@ -138,7 +130,7 @@ pub const Device = struct {
             util.errorf(@src(), "too long, dev={s}, mtu={d}, len={d}", .{ self.name(), self.mtu, data.len });
             return error.DeviceOutputTooLong;
         }
-        self.ops.output(self, typ, data) catch |err| {
+        self.ops.output(self, typ, data, dst) catch |err| {
             util.errorf(@src(), "ops.output() failure, dev={s}, err={t}", .{ self.name(), err });
             return err;
         };
@@ -188,20 +180,17 @@ pub const Device = struct {
 var devices: std.ArrayList(*Device) = .empty;
 var device_index: usize = 0;
 
-pub fn register(dev: Device) !*Device {
+pub fn register(dev: *Device) !void {
     const allocator = platform.allocator;
 
-    const ptr = try allocator.create(Device);
-    errdefer allocator.destroy(ptr);
+    dev.index = device_index;
+    const name_buf = try std.fmt.bufPrint(&dev.name_buf, "net{d}", .{device_index});
+    dev.name_len = name_buf.len;
 
-    ptr.* = try Device.initRegistered(dev, device_index);
-
-    try devices.append(allocator, ptr);
+    try devices.append(allocator, dev);
     device_index += 1;
 
-    util.infof(@src(), "success, dev={s}, index={d}", .{ ptr.name(), ptr.index });
-
-    return ptr;
+    util.infof(@src(), "success, dev={s}, index={d}", .{ dev.name(), dev.index });
 }
 
 pub fn getAll() []const *Device {

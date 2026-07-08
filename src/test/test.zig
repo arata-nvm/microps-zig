@@ -2,12 +2,15 @@ const std = @import("std");
 const microps = @import("microps");
 
 const device = microps.device;
+const ether = microps.ether;
 const loopback = microps.driver.loopback;
 const icmp = microps.icmp;
 const ip = microps.ip;
 const net = microps.net;
 const platform = microps.platform;
 const util = microps.util;
+
+const ether_tap = platform.ether_tap;
 
 // Scope of Internet host loopback address.
 //  - see https://tools.ietf.org/html/rfc5735
@@ -59,27 +62,59 @@ fn setup() !void {
         util.errorf(@src(), "net.init() failure: {t}", .{err});
         return err;
     };
-    const dev = loopback.init() catch |err| {
-        util.errorf(@src(), "loopback.init() failure: {t}", .{err});
-        return err;
-    };
+
     const allocator = platform.allocator;
-    const unicast = ip.IpAddr.fromString(LOOPBACK_IP_ADDR) catch |err| {
-        util.errorf(@src(), "IpAddr.fromString() failure: {t}", .{err});
-        return err;
-    };
-    const netmask = ip.IpAddr.fromString(LOOPBACK_NETMASK) catch |err| {
-        util.errorf(@src(), "IpAddr.fromString() failure: {t}", .{err});
-        return err;
-    };
-    const iface = ip.IpIface.create(allocator, unicast, netmask) catch |err| {
-        util.errorf(@src(), "IpIface.create() failure: {t}", .{err});
-        return err;
-    };
-    ip.registerIface(dev, iface) catch |err| {
-        util.errorf(@src(), "ip.registerIface() failure: {t}", .{err});
-        return err;
-    };
+
+    {
+        const dev = loopback.init() catch |err| {
+            util.errorf(@src(), "loopback.init() failure: {t}", .{err});
+            return err;
+        };
+        const unicast = ip.IpAddr.fromString(LOOPBACK_IP_ADDR) catch |err| {
+            util.errorf(@src(), "IpAddr.fromString() failure: {t}", .{err});
+            return err;
+        };
+        const netmask = ip.IpAddr.fromString(LOOPBACK_NETMASK) catch |err| {
+            util.errorf(@src(), "IpAddr.fromString() failure: {t}", .{err});
+            return err;
+        };
+        const iface = ip.IpIface.create(allocator, unicast, netmask) catch |err| {
+            util.errorf(@src(), "IpIface.create() failure: {t}", .{err});
+            return err;
+        };
+        ip.registerIface(dev, iface) catch |err| {
+            util.errorf(@src(), "ip.registerIface() failure: {t}", .{err});
+            return err;
+        };
+    }
+
+    {
+        const addr = ether.EtherAddr.fromString(ETHER_TAP_HW_ADDR) catch |err| {
+            util.errorf(@src(), "EtherAddr.fromString() failure: {t}", .{err});
+            return err;
+        };
+        const dev = ether_tap.init(ETHER_TAP_NAME, addr) catch |err| {
+            util.errorf(@src(), "ether_tap.init() failure: {t}", .{err});
+            return err;
+        };
+        const unicast = ip.IpAddr.fromString(ETHER_TAP_IP_ADDR) catch |err| {
+            util.errorf(@src(), "IpAddr.fromString() failure: {t}", .{err});
+            return err;
+        };
+        const netmask = ip.IpAddr.fromString(ETHER_TAP_NETMASK) catch |err| {
+            util.errorf(@src(), "IpAddr.fromString() failure: {t}", .{err});
+            return err;
+        };
+        const iface = ip.IpIface.create(allocator, unicast, netmask) catch |err| {
+            util.errorf(@src(), "IpIface.create() failure: {t}", .{err});
+            return err;
+        };
+        ip.registerIface(dev, iface) catch |err| {
+            util.errorf(@src(), "ip.registerIface() failure: {t}", .{err});
+            return err;
+        };
+    }
+
     net.run() catch |err| {
         util.errorf(@src(), "net.run() failure: {t}", .{err});
         return err;
@@ -95,22 +130,8 @@ fn cleanup() !void {
 }
 
 fn appMain(io: std.Io) !void {
-    const src = ip.IpAddr.fromString(LOOPBACK_IP_ADDR) catch |err| {
-        util.errorf(@src(), "IpAddr.fromString() failure: {t}", .{err});
-        return err;
-    };
-    const dst = src;
-    const id: u16 = @intCast(std.os.linux.getpid());
-    const data: []const u8 = "TEST";
-    var seq: u16 = 0;
-
     util.debugf(@src(), "press Ctrl+C to terminate", .{});
     while (!terminate.load(.seq_cst)) {
-        seq += 1;
-        _ = icmp.output(.{ .echo = .{ .id = id, .seq = seq } }, data, src, dst) catch |err| {
-            util.errorf(@src(), "ip.output() failure: {t}", .{err});
-            return err;
-        };
         try io.sleep(.fromSeconds(1), .awake);
     }
     util.debugf(@src(), "terminate", .{});

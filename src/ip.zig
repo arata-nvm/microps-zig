@@ -40,6 +40,12 @@ pub const IpAddr = struct {
         return IpAddr{ .addr = std.mem.readInt(u32, bytes[0..], .big) };
     }
 
+    pub fn toBytes(self: Self) [len]u8 {
+        var bytes: [len]u8 = undefined;
+        std.mem.writeInt(u32, bytes[0..], self.addr, .big);
+        return bytes;
+    }
+
     pub fn fromString(s: []const u8) !IpAddr {
         var parts: [4]u8 = undefined;
         var it = std.mem.splitScalar(u8, s, '.');
@@ -327,13 +333,16 @@ fn selectIface(addr: IpAddr) ?*IpIface {
 
 fn outputDevice(iface: *IpIface, data: []const u8, target: IpAddr) !void {
     util.debugf(@src(), "dev={s}, len={d}, target={f}", .{ iface.dev().name(), data.len, target });
+    var hwaddr: [device.Device.addr_len]u8 = undefined;
     if (iface.dev().flags.need_arp) {
-        if (target.eql(iface.broadcast) or target.eql(IpAddr.broadcast)) {} else {
+        if (target.eql(iface.broadcast) or target.eql(IpAddr.broadcast)) {
+            @memcpy(hwaddr[0..iface.dev().alen], &iface.dev().broadcast);
+        } else {
             util.errorf(@src(), "ARP not implemented", .{});
             return error.IpArpNotImplemented;
         }
     }
-    return iface.dev().output(.ip, data);
+    return iface.dev().output(.ip, data, &hwaddr);
 }
 
 fn buildPacket(buf: []u8, protocol: IpProtocolType, data: []const u8, id: u16, offset: u13, src: IpAddr, dst: IpAddr) ![]const u8 {
