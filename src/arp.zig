@@ -14,7 +14,7 @@ const ArpHrd = enum(u16) {
 };
 
 const ArpPro = enum(u16) {
-    ip = ether.EtherType.ip,
+    ip = @intFromEnum(ether.EtherType.ip),
 };
 
 const ArpOp = enum(u16) {
@@ -39,13 +39,17 @@ const ArpHdr = struct {
             return error.ArpHdrTooShort;
         }
         const hrd = std.mem.readInt(u16, data[0..2], .big);
+        const pro = std.mem.readInt(u16, data[2..4], .big);
         const op = std.mem.readInt(u16, data[6..8], .big);
         const self = Self{
             .hrd = std.enums.fromInt(ArpHrd, hrd) orelse {
                 util.errorf(@src(), "unknown arp hrd: {d}", .{hrd});
                 return error.ArpUnknownHrd;
             },
-            .pro = std.mem.readInt(u16, data[2..4], .big),
+            .pro = std.enums.fromInt(ArpPro, pro) orelse {
+                util.errorf(@src(), "unknown arp pro: {d}", .{pro});
+                return error.ArpUnknownPro;
+            },
             .hln = data[4],
             .pln = data[5],
             .op = std.enums.fromInt(ArpOp, op) orelse {
@@ -53,18 +57,18 @@ const ArpHdr = struct {
                 return error.ArpUnknownOp;
             },
         };
-        if (self.hrd != .ethernet or self.hln != ether.EtherAddr.len) {
-            util.errorf(@src(), "unsupported hardware address");
+        if (self.hrd != .ether or self.hln != ether.EtherAddr.len) {
+            util.errorf(@src(), "unsupported hardware address", .{});
             return error.ArpUnsupportedHrd;
         }
         if (self.pro != .ip or self.pln != ip.IpAddr.len) {
-            util.errorf(@src(), "unsupported protocol address");
+            util.errorf(@src(), "unsupported protocol address", .{});
             return error.ArpUnsupportedPro;
         }
         return self;
     }
 
-    pub fn encode(self: *Self, buf: []u8) !void {
+    pub fn encode(self: *const Self, buf: []u8) !void {
         if (buf.len < size) {
             util.errorf(@src(), "buffer too short: len={d} < size={d}", .{ buf.len, size });
             return error.ArpBufferTooShort;
@@ -86,10 +90,6 @@ const ArpHdr = struct {
         try writer.print("        hln: {d}\n", .{self.hln});
         try writer.print("        pln: {d}\n", .{self.pln});
         try writer.print("         op: {d} ({t})\n", .{ @intFromEnum(self.op), self.op });
-        try writer.print("        sha: {s}\n", .{self.sha});
-        try writer.print("        spa: {s}\n", .{self.spa});
-        try writer.print("        tha: {s}\n", .{self.tha});
-        try writer.print("        tpa: {s}\n", .{self.tpa});
     }
 };
 
@@ -104,37 +104,57 @@ const ArpEtherIp = struct {
     tha: ether.EtherAddr,
     tpa: ip.IpAddr,
 
+    pub fn init(op: ArpOp, sha: ether.EtherAddr, spa: ip.IpAddr, tha: ether.EtherAddr, tpa: ip.IpAddr) Self {
+        return Self{
+            .hdr = .{
+                .hrd = .ether,
+                .pro = .ip,
+                .hln = ether.EtherAddr.len,
+                .pln = ip.IpAddr.len,
+                .op = op,
+            },
+            .sha = sha,
+            .spa = spa,
+            .tha = tha,
+            .tpa = tpa,
+        };
+    }
+
     pub fn decode(data: []const u8) !Self {
         if (data.len < size) {
             util.errorf(@src(), "too short, len={d}", .{data.len});
             return error.ArpPacketTooShort;
         }
-        const hdr = ArpHdr.decode(data[0..ArpHdr.size]) catch |err| {
-            util.errorf(@src(), "ArpHdr.decode() failure: {t}", .{err});
-            return err;
-        };
-        const ether_len = ether.EtherAddr.len;
-        const ip_len = ip.IpAddr.len;
         return Self{
-            .hdr = hdr,
-            .sha = ether.EtherAddr.fromBytes(data[ArpHdr.size .. ArpHdr.size + ether_len].*),
-            .spa = ip.IpAddr.fromBytes(data[ArpHdr.size + ether_len .. ArpHdr.size + ether_len + ip_len].*),
-            .tha = ether.EtherAddr.fromBytes(data[ArpHdr.size + ether_len + ip_len .. ArpHdr.size + ether_len * 2 + ip_len].*),
-            .tpa = ip.IpAddr.fromBytes(data[ArpHdr.size + ether_len * 2 + ip_len .. ArpHdr.size + ether_len * 2 + ip_len * 2].*),
+            .hdr = try ArpHdr.decode(data[0..ArpHdr.size]),
+            .sha = ether.EtherAddr.fromBytes(data[8..14].*),
+            .spa = ip.IpAddr.fromBytes(data[14..18].*),
+            .tha = ether.EtherAddr.fromBytes(data[18..24].*),
+            .tpa = ip.IpAddr.fromBytes(data[24..28].*),
         };
     }
 
-    pub fn encode(self: *Self, buf: []u8) !void {
+    pub fn encode(self: *const Self, buf: []u8) !void {
         if (buf.len < size) {
             util.errorf(@src(), "buffer too short: len={d} < size={d}", .{ buf.len, size });
             return error.ArpBufferTooShort;
         }
+        try self.hdr.encode(buf[0..ArpHdr.size]);
+        buf[8..14].* = self.sha.toBytes();
+        buf[14..18].* = self.spa.toBytes();
+        buf[18..24].* = self.tha.toBytes();
+        buf[24..28].* = self.tpa.toBytes();
+    }
 
-        std.mem.writeInt(u16, buf[0..2], @intFromEnum(self.hrd), .big);
-        std.mem.writeInt(u16, buf[2..4], @intFromEnum(self.pro), .big);
-        buf[4] = self.hln;
-        buf[5] = self.pln;
-        std.mem.writeInt(u16, buf[6..8], @intFromEnum(self.op), .big);
+    pub fn format(
+        self: Self,
+        writer: *std.Io.Writer,
+    ) !void {
+        try writer.print("{f}", .{self.hdr});
+        try writer.print("        sha: {f}\n", .{self.sha});
+        try writer.print("        spa: {f}\n", .{self.spa});
+        try writer.print("        tha: {f}\n", .{self.tha});
+        try writer.print("        tpa: {f}\n", .{self.tpa});
     }
 };
 
@@ -147,14 +167,14 @@ const ArpCache = struct {
     const Entry = struct {
         pa: ip.IpAddr,
         timestamp: std.c.timeval,
-        state: union {
+        state: union(enum) {
             incomplete: void,
             resolved: ether.EtherAddr,
             static: ether.EtherAddr,
         },
     };
 
-    const ResolveResult = union {
+    const ResolveResult = union(enum) {
         miss: void,
         waiting: void,
         resolved: ether.EtherAddr,
@@ -221,8 +241,15 @@ const ArpCache = struct {
             if (e.state == .static) {
                 continue;
             }
-            if (util.timevalSub(now, e.timestamp) > timeout_sec) {
-                util.debugf(@src(), "DELETE: pa={f}, ha={f}", .{ e.pa, e.state });
+            if (util.timevalSub(now, e.timestamp).sec > timeout_sec) {
+                switch (e.state) {
+                    .incomplete => {
+                        util.debugf(@src(), "DELETE: pa={f}, state={t}", .{ e.pa, e.state });
+                    },
+                    .resolved, .static => |ha| {
+                        util.debugf(@src(), "DELETE: pa={f}, ha={t} ({f})", .{ e.pa, e.state, ha });
+                    },
+                }
                 entry.* = null;
             }
         }
@@ -237,7 +264,11 @@ const ArpCache = struct {
             if (e.state == .static) {
                 continue;
             }
-            if (util.timevalCmp(e.timestamp, oldest.*.timestamp) < 0) {
+            const o = oldest.* orelse {
+                oldest = entry;
+                continue;
+            };
+            if (util.timevalCmp(e.timestamp, o.timestamp) < 0) {
                 oldest = entry;
             }
         }
@@ -256,14 +287,14 @@ const ArpCache = struct {
     }
 };
 
-const cache: ArpCache = .{};
+var cache: ArpCache = .{};
 
 pub fn init() !void {
     net.register(.arp, input) catch |err| {
         util.errorf(@src(), "net.register() failure: {t}", .{err});
         return err;
     };
-    platform.timer.register(.{ .sec = 1 }, timer) catch |err| {
+    platform.timer.register(.{ .sec = 1, .usec = 0 }, timer) catch |err| {
         util.errorf(@src(), "platform.timer.register() failure: {t}", .{err});
         return err;
     };
@@ -286,48 +317,56 @@ fn input(data: []const u8, dev: *device.Device) !void {
             cache.insert(msg.spa, msg.sha, now);
         }
         if (msg.hdr.op == .request) {
-            try reply(&iface.iface, msg.sha, msg.spa, msg.sha);
+            try reply(iface, msg.sha, msg.spa, msg.sha);
         }
     }
 }
 
-fn reply(iface: *device.Iface, tha: ether.EtherAddr, tpa: ip.IpAddr, dst: ether.EtherAddr) !void {
-    const msg = ArpEtherIp{
-        .hdr = .{
-            .hrd = .ether,
-            .pro = .ip,
-            .hln = ether.EtherAddr.len,
-            .pln = ip.IpAddr.len,
-            .op = .reply,
-        },
-        .sha = ether.EtherAddr.fromBytes(iface.dev.addr[0..ether.EtherAddr.len].*),
-        .spa = iface.unicast,
-        .tha = tha,
-        .tpa = tpa,
-    };
-    util.debugf("dev={s}, len={d}", .{ iface.dev.name(), ArpEtherIp.size });
+fn request(iface: *ip.IpIface, tpa: ip.IpAddr) !void {
+    const msg = ArpEtherIp.init(
+        .request,
+        ether.EtherAddr.fromBytes(iface.dev().addr[0..ether.EtherAddr.len].*),
+        iface.unicast,
+        ether.EtherAddr.any,
+        tpa,
+    );
+    util.debugf(@src(), "dev={s}, len={d}", .{ iface.dev().name(), ArpEtherIp.size });
     std.debug.print("{f}", .{msg});
 
     var buf: [ArpEtherIp.size]u8 = undefined;
     try msg.encode(&buf);
-    util.debugdump(buf);
-    return iface.dev.output(.arp, buf, dst.toBytes());
+    util.debugdump(&buf);
+    return iface.dev().output(.arp, &buf, &iface.dev().broadcast);
 }
 
-fn resolve(iface: *device.Iface, pa: ip.IpAddr) !ether.EtherAddr {
-    if (iface.dev.type != .ethernet) {
-        util.debuf(@src(), "unsupported hardware address type");
+fn reply(iface: *ip.IpIface, tha: ether.EtherAddr, tpa: ip.IpAddr, dst: ether.EtherAddr) !void {
+    const msg = ArpEtherIp.init(
+        .reply,
+        ether.EtherAddr.fromBytes(iface.dev().addr[0..ether.EtherAddr.len].*),
+        iface.unicast,
+        tha,
+        tpa,
+    );
+    util.debugf(@src(), "dev={s}, len={d}", .{ iface.dev().name(), ArpEtherIp.size });
+    std.debug.print("{f}", .{msg});
+
+    var buf: [ArpEtherIp.size]u8 = undefined;
+    try msg.encode(&buf);
+    util.debugdump(&buf);
+    return iface.dev().output(.arp, &buf, &dst.toBytes());
+}
+
+pub fn resolve(iface: *ip.IpIface, pa: ip.IpAddr) !ether.EtherAddr {
+    if (iface.dev().type != .ethernet) {
+        util.debugf(@src(), "unsupported hardware address type", .{});
         return error.ArpUnsupportedHrd;
     }
-    if (iface.family != .ip) {
-        util.debugf(@src(), "unsupported protocol address type");
-        return error.ArpUnsupportedPro;
-    }
+
     const now = util.timevalNow();
     switch (cache.resolve(pa, now)) {
         .miss, .waiting => {
-            util.debugf(@src(), "cache not found, pa={f}", .{pa});
-            return error.ArpCacheNotFound;
+            try request(iface, pa);
+            return error.ArpResolveWaiting;
         },
         .resolved => |ha| {
             util.debugf(@src(), "resolved, pa={f}, ha={f}", .{ pa, ha });

@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const arp = @import("arp.zig");
 const device = @import("device.zig");
 const icmp = @import("icmp.zig");
 const net = @import("net.zig");
@@ -338,8 +339,11 @@ fn outputDevice(iface: *IpIface, data: []const u8, target: IpAddr) !void {
         if (target.eql(iface.broadcast) or target.eql(IpAddr.broadcast)) {
             @memcpy(hwaddr[0..iface.dev().alen], &iface.dev().broadcast);
         } else {
-            util.errorf(@src(), "ARP not implemented", .{});
-            return error.IpArpNotImplemented;
+            const ha = arp.resolve(iface, target) catch |err| switch (err) {
+                error.ArpResolveWaiting => return,
+                else => return err,
+            };
+            @memcpy(hwaddr[0..iface.dev().alen], &ha.toBytes());
         }
     }
     return iface.dev().output(.ip, data, &hwaddr);

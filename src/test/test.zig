@@ -130,8 +130,17 @@ fn cleanup() !void {
 }
 
 fn appMain(io: std.Io) !void {
+    const src = try ip.IpAddr.fromString("192.0.2.2");
+    const dst = try ip.IpAddr.fromString("192.0.2.1");
+    const id: u16 = @intCast(std.os.linux.getpid());
+
     util.debugf(@src(), "press Ctrl+C to terminate", .{});
+    var seq: u16 = 0;
     while (!terminate.load(.seq_cst)) {
+        seq += 1;
+        _ = icmp.output(.{ .echo = .{ .id = id, .seq = seq } }, &[_]u8{}, src, dst) catch |err| {
+            util.errorf(@src(), "icmp.output() failure: {t}", .{err});
+        };
         try io.sleep(.fromSeconds(1), .awake);
     }
     util.debugf(@src(), "terminate", .{});
