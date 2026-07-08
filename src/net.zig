@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const arp = @import("arp.zig");
 const platform = @import("platform/linux/platform.zig");
 const device = @import("device.zig");
 const icmp = @import("icmp.zig");
@@ -61,6 +62,10 @@ pub fn init() !void {
     };
     icmp.init() catch |err| {
         util.errorf(@src(), "icmp.init() failure: {t}", .{err});
+        return err;
+    };
+    arp.init() catch |err| {
+        util.errorf(@src(), "arp.init() failure: {t}", .{err});
         return err;
     };
     util.infof(@src(), "success", .{});

@@ -1,3 +1,4 @@
+pub const arp = @import("arp.zig");
 pub const device = @import("device.zig");
 pub const driver = @import("driver.zig");
 pub const ether = @import("ether.zig");
@@ -8,6 +9,7 @@ pub const util = @import("util.zig");
 pub const platform = @import("platform/linux/platform.zig");
 
 test {
+    _ = arp;
     _ = device;
     _ = driver;
     _ = driver.loopback;
