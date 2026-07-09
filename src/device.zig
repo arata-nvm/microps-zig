@@ -2,7 +2,7 @@ const std = @import("std");
 
 const util = @import("util.zig");
 const net = @import("net.zig");
-const platform = @import("platform/linux/platform.zig");
+const platform = @import("platform.zig");
 
 pub const DeviceType = enum(u16) {
     dummy = 0,
@@ -80,7 +80,7 @@ pub const Device = struct {
     pub fn init(typ: DeviceType, mtu: u16, flags: DeviceFlags, hlen: u16, alen: u16, ops: DeviceOps) Self {
         return Self{
             .index = 0,
-            .name_buf = std.mem.zeroes([ifname_size]u8),
+            .name_buf = @splat(0),
             .name_len = 0,
             .type = typ,
             .mtu = mtu,
@@ -120,7 +120,7 @@ pub const Device = struct {
     }
 
     pub fn output(self: *Self, typ: net.ProtocolType, data: []const u8, dst: ?[]const u8) !void {
-        util.debugf(@src(), "dev={s}, type={x:0>4}, len={d}", .{ self.name(), typ, data.len });
+        util.debugf(@src(), "dev={s}, type=0x{x:0>4}, len={d}", .{ self.name(), typ, data.len });
         util.debugdump(data);
         if (!self.isUp()) {
             util.errorf(@src(), "not opened: dev={s}", .{self.name()});
@@ -144,7 +144,7 @@ pub const Device = struct {
             }
         }
 
-        const allocator = platform.allocator;
+        const allocator = platform.allocator();
         try self.ifaces.append(allocator, iface);
         iface.dev = self;
         util.infof(@src(), "success, dev={s}", .{self.name()});
@@ -181,7 +181,7 @@ var devices: std.ArrayList(*Device) = .empty;
 var device_index: usize = 0;
 
 pub fn register(dev: *Device) !void {
-    const allocator = platform.allocator;
+    const allocator = platform.allocator();
 
     dev.index = device_index;
     const name_buf = try std.fmt.bufPrint(&dev.name_buf, "net{d}", .{device_index});

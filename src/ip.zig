@@ -4,7 +4,7 @@ const arp = @import("arp.zig");
 const device = @import("device.zig");
 const icmp = @import("icmp.zig");
 const net = @import("net.zig");
-const platform = @import("platform/linux/platform.zig");
+const platform = @import("platform.zig");
 const util = @import("util.zig");
 
 const version_v4 = 4;
@@ -38,7 +38,7 @@ pub const IpAddr = struct {
     pub const broadcast = IpAddr{ .addr = 0xffffffff };
 
     pub fn fromBytes(bytes: [len]u8) IpAddr {
-        return IpAddr{ .addr = std.mem.readInt(u32, bytes[0..], .big) };
+        return IpAddr{ .addr = std.mem.readInt(u32, &bytes, .big) };
     }
 
     pub fn toBytes(self: Self) [len]u8 {
@@ -66,7 +66,7 @@ pub const IpAddr = struct {
         return (self.addr & netmask.addr) == (other.addr & netmask.addr);
     }
 
-    pub fn format(self: Self, writer: anytype) !void {
+    pub fn format(self: Self, writer: *std.Io.Writer) !void {
         try writer.print("{d}.{d}.{d}.{d}", .{
             (self.addr >> 24) & 0xff,
             (self.addr >> 16) & 0xff,
@@ -171,7 +171,7 @@ pub const IpHdr = struct {
         std.mem.writeInt(u16, buf[10..12], self.sum, .big);
     }
 
-    pub fn format(self: Self, writer: anytype) !void {
+    pub fn format(self: Self, writer: *std.Io.Writer) !void {
         try writer.print("        vhl: [v={d}, hl={d} ({d})]\n", .{ self.version, self.hlen_4byte, self.hlen() });
         try writer.print("        tos: 0x{x:0>2}\n", .{self.tos});
         try writer.print("      total: {d} (payload={d})\n", .{ self.total, self.total - self.hlen() });
@@ -194,7 +194,8 @@ pub const IpIface = struct {
     netmask: IpAddr,
     broadcast: IpAddr,
 
-    pub fn create(allocator: std.mem.Allocator, unicast: IpAddr, netmask: IpAddr) !*Self {
+    pub fn create(unicast: IpAddr, netmask: IpAddr) !*Self {
+        const allocator = platform.allocator();
         const self = try allocator.create(Self);
 
         const broadcast = IpAddr{ .addr = (unicast.addr & netmask.addr) | ~netmask.addr };
@@ -226,7 +227,7 @@ const IpProtocolHandler = *const fn (hdr: *const IpHdr, data: []const u8, iface:
 const IpProtocol = struct { type: IpProtocolType, handler: IpProtocolHandler };
 
 var ifaces: std.ArrayList(*IpIface) = .empty;
-var protocols: std.ArrayList(*IpProtocol) = .empty;
+var protocols: std.ArrayList(IpProtocol) = .empty;
 
 pub fn init() !void {
     net.register(.ip, input) catch |err| {
@@ -236,7 +237,7 @@ pub fn init() !void {
 }
 
 pub fn registerIface(dev: *device.Device, iface: *IpIface) !void {
-    const allocator = platform.allocator;
+    const allocator = platform.allocator();
     try dev.addIface(&iface.iface);
     try ifaces.append(allocator, iface);
 }
@@ -249,13 +250,11 @@ pub fn registerProtocol(typ: IpProtocolType, handler: IpProtocolHandler) !void {
         }
     }
 
-    const allocator = platform.allocator;
-    const proto = try allocator.create(IpProtocol);
-    errdefer allocator.destroy(proto);
-
-    proto.type = typ;
-    proto.handler = handler;
-    try protocols.append(allocator, proto);
+    const allocator = platform.allocator();
+    try protocols.append(allocator, .{
+        .type = typ,
+        .handler = handler,
+    });
 
     util.infof(@src(), "success, type={t}", .{typ});
 }
@@ -277,9 +276,9 @@ fn input(data: []const u8, dev: *device.Device) !void {
         }
     }
     util.debugf(@src(), "permit, dev={s}, iface={f}", .{ dev.name(), iface.unicast });
-    std.debug.print("{f}", .{hdr});
+    util.dumpf("{f}", .{hdr});
     for (protocols.items) |proto| {
-        if (proto.type == @as(IpProtocolType, hdr.protocol)) {
+        if (proto.type == hdr.protocol) {
             try proto.handler(&hdr, data[hdr.hlen()..], iface);
             return;
         }
@@ -337,13 +336,14 @@ fn outputDevice(iface: *IpIface, data: []const u8, target: IpAddr) !void {
     var hwaddr: [device.Device.addr_len]u8 = undefined;
     if (iface.dev().flags.need_arp) {
         if (target.eql(iface.broadcast) or target.eql(IpAddr.broadcast)) {
-            @memcpy(hwaddr[0..iface.dev().alen], &iface.dev().broadcast);
+            hwaddr = iface.dev().broadcast;
         } else {
             const ha = arp.resolve(iface, target) catch |err| switch (err) {
                 error.ArpResolveWaiting => return,
                 else => return err,
             };
-            @memcpy(hwaddr[0..iface.dev().alen], &ha.toBytes());
+            const ha_bytes = ha.toBytes();
+            hwaddr[0..ha_bytes.len].* = ha_bytes;
         }
     }
     return iface.dev().output(.ip, data, &hwaddr);
@@ -370,7 +370,7 @@ fn buildPacket(buf: []u8, protocol: IpProtocolType, data: []const u8, id: u16, o
     };
     try hdr.encode(buf);
     @memcpy(buf[hlen..total], data);
-    std.debug.print("{f}", .{hdr});
+    util.dumpf("{f}", .{hdr});
     return buf[0..total];
 }
 

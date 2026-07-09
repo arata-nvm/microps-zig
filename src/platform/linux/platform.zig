@@ -4,9 +4,31 @@ pub const intr = @import("intr.zig");
 pub const timer = @import("timer.zig");
 pub const sched = @import("sched.zig");
 
-pub const ether_tap = @import("driver/ether_tap.zig");
+pub const driver = struct {
+    pub const ether_tap = @import("driver/ether_tap.zig");
+};
 
-pub fn init() !void {
+pub const InitOptions = struct {
+    io: std.Io,
+    gpa: std.mem.Allocator = std.heap.c_allocator,
+};
+
+var io: ?std.Io = null;
+pub var allocator: std.mem.Allocator = undefined;
+var started: std.Io.Timestamp = .zero;
+
+var initialized: bool = false;
+
+pub fn init(options: InitOptions) !void {
+    if (initialized) {
+        return;
+    }
+    initialized = true;
+
+    io = options.io;
+    allocator = options.gpa;
+    started = now();
+
     try intr.init();
     try timer.init();
 }
@@ -21,8 +43,6 @@ pub fn shutdown() !void {
     try timer.shutdown();
 }
 
-pub const allocator = std.heap.c_allocator;
-
 pub const Lock = struct {
     inner: std.c.pthread_mutex_t = .{},
 
@@ -35,8 +55,25 @@ pub const Lock = struct {
     }
 };
 
+pub fn now() std.Io.Timestamp {
+    const i = io orelse return .zero;
+    return .now(i, .awake);
+}
+
 pub fn random16() u16 {
+    const i = io orelse return 0;
     var b: [2]u8 = undefined;
-    std.debug.assert(std.os.linux.getrandom(&b, b.len, 0) == b.len);
+    i.random(&b);
     return @bitCast(b);
+}
+
+pub fn log(bytes: []const u8) void {
+    var buffer: [64]u8 = undefined;
+    const stderr = std.debug.lockStderr(&buffer);
+    defer std.debug.unlockStderr();
+    stderr.file_writer.interface.writeAll(bytes) catch {};
+}
+
+pub fn uptime() std.Io.Duration {
+    return started.durationTo(now());
 }

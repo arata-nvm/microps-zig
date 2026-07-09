@@ -20,38 +20,33 @@ extern "c" fn timer_settime(timerid: timer_t, flags: c_int, new_value: *const st
 extern "c" fn timer_delete(timerid: timer_t) c_int;
 
 const Timer = struct {
-    interval: std.c.timeval,
-    last: std.c.timeval,
+    interval: std.Io.Duration,
+    last: std.Io.Timestamp,
     handler: *const fn () void,
 };
 
 var timerid: timer_t = undefined;
 
 /// NOTE: if you want to add/delete the entries after timer_run(), you need to protect these lists with a mutex.
-var timers: std.ArrayList(*Timer) = .empty;
+var timers: std.ArrayList(Timer) = .empty;
 
-pub fn register(interval: std.c.timeval, handler: *const fn () void) !void {
+pub fn register(interval: std.Io.Duration, handler: *const fn () void) !void {
     const allocator = platform.allocator;
-    const timer = try allocator.create(Timer);
-    var last: std.c.timeval = undefined;
-    _ = std.c.gettimeofday(&last, null);
-    timer.* = .{
+    try timers.append(allocator, .{
         .interval = interval,
-        .last = last,
+        .last = platform.now(),
         .handler = handler,
-    };
-    try timers.append(allocator, timer);
-    util.infof(@src(), "success, interval={{{d}, {d}}}", .{ interval.sec, interval.usec });
+    });
+    util.infof(@src(), "success, interval={f}", .{interval});
 }
 
 fn timerIrqHandler(irq: u32, arg: ?*anyopaque) !void {
     _ = irq;
     _ = arg;
-    var now: std.c.timeval = undefined;
-    _ = std.c.gettimeofday(&now, null);
-    for (timers.items) |t| {
-        const diff = util.timevalSub(now, t.last);
-        if (util.timevalCmp(t.interval, diff) < 0) {
+    const now = platform.now();
+    for (timers.items) |*t| {
+        const diff = t.last.durationTo(now);
+        if (t.interval.nanoseconds <= diff.nanoseconds) {
             t.handler();
             t.last = now;
         }
@@ -101,9 +96,8 @@ test "periodic timer" {
         }
     };
 
-    try intr.init();
-    try init();
-    try register(.{ .sec = 0, .usec = 10 * std.time.us_per_ms }, Context.handler);
+    try platform.init(.{ .io = std.testing.io });
+    try register(.fromMicroseconds(10), Context.handler);
     try intr.run();
     try run();
     var retry: usize = 0;

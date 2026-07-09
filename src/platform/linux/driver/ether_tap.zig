@@ -10,15 +10,15 @@ const util = @import("../../../util.zig");
 
 const clone_device = "/dev/net/tun";
 
-const TUNSETIFF: u32 = linux.IOCTL.IOW('T', 202, i32);
-const IFF_TAP: u16 = 0x0002;
-const IFF_NO_PI: u16 = 0x1000;
+pub const TUNSETIFF: u32 = linux.IOCTL.IOW('T', 202, i32);
+pub const IFF_TAP: u16 = 0x0002;
+pub const IFF_NO_PI: u16 = 0x1000;
 
 const EtherTap = struct {
     const Self = @This();
 
     dev: device.Device,
-    name_buf: [device.Device.ifname_size - 1:0]u8,
+    ifname_buf: [device.Device.ifname_size - 1:0]u8,
     fd: i32,
     irq: u32,
 
@@ -26,13 +26,13 @@ const EtherTap = struct {
         return @fieldParentPtr("dev", dev);
     }
 
-    fn name(self: *const Self) [:0]const u8 {
-        return std.mem.sliceTo(&self.name_buf, 0);
+    fn ifname(self: *const Self) [:0]const u8 {
+        return std.mem.sliceTo(&self.ifname_buf, 0);
     }
 
     fn ifr(self: *Self) linux.ifreq {
         var i = std.mem.zeroes(linux.ifreq);
-        @memcpy(i.ifrn.name[0..self.name().len], self.name());
+        @memcpy(i.ifrn.name[0..self.ifname().len], self.ifname());
         return i;
     }
 };
@@ -68,16 +68,16 @@ pub fn init(name: []const u8, addr: ?ether.EtherAddr) !*device.Device {
             ether.EtherAddr.len,
             ops,
         ),
-        .name_buf = std.mem.zeroes([device.Device.ifname_size - 1:0]u8),
+        .ifname_buf = @splat(0),
         .fd = -1,
         .irq = intr.irqBase(),
     };
-    @memcpy(tap.name_buf[0..name.len], name);
+    @memcpy(tap.ifname_buf[0..name.len], name);
 
     if (addr) |a| {
-        @memcpy(tap.dev.addr[0..ether.EtherAddr.len], &a.toBytes());
+        tap.dev.addr[0..ether.EtherAddr.len].* = a.toBytes();
     }
-    @memcpy(tap.dev.broadcast[0..ether.EtherAddr.len], &ether.EtherAddr.broadcast.toBytes());
+    tap.dev.broadcast[0..ether.EtherAddr.len].* = ether.EtherAddr.broadcast.toBytes();
 
     device.register(&tap.dev) catch |err| {
         util.errorf(@src(), "device.register() failure: {t}", .{err});
@@ -104,7 +104,7 @@ pub fn setDefaultAddr(dev: *device.Device) !void {
     _ = sys(linux.ioctl(soc, linux.SIOCGIFHWADDR, @intFromPtr(&ifr))) catch |err| {
         util.errorf(@src(), "ioctl(SIOCGIFHWADDR): {t}, dev={s}", .{ err, dev.name() });
     };
-    @memcpy(dev.addr[0..ether.EtherAddr.len], ifr.ifru.hwaddr.data[0..ether.EtherAddr.len]);
+    dev.addr[0..ether.EtherAddr.len].* = ifr.ifru.hwaddr.data[0..ether.EtherAddr.len].*;
 }
 
 const ops = device.DeviceOps{
@@ -190,7 +190,7 @@ fn output(dev: *device.Device, typ: net.ProtocolType, data: []const u8, dst: ?[]
 
     const frame_len = offset + @max(data.len, ether.payload_size_min);
     util.debugf(@src(), "dev={s}, type=0x{x:0>4}, len={d}", .{ dev.name(), typ, frame_len });
-    std.debug.print("{f}", .{hdr});
+    util.dumpf("{f}", .{hdr});
 
     const tap = EtherTap.from(dev);
     _ = sys(linux.write(tap.fd, &frame, frame_len)) catch |err| {
@@ -215,7 +215,7 @@ fn input(dev: *device.Device, frame: []const u8) !void {
     }
 
     util.debugf(@src(), "dev={s}, type=0x{x:0>4}, len={d}", .{ dev.name(), d.hdr.type, frame.len });
-    std.debug.print("{f}", .{d.hdr});
+    util.dumpf("{f}", .{d.hdr});
     return net.input(d.hdr.type, d.payload, dev);
 }
 

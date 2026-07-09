@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const ip = @import("ip.zig");
-const platform = @import("platform/linux/platform.zig");
+const platform = @import("platform.zig");
 const util = @import("util.zig");
 
 const buf_size = ip.payload_size_max;
@@ -90,7 +90,7 @@ const IcmpHdr = struct {
         }
 
         buf[0] = @intFromEnum(self.msg);
-        std.mem.writeInt(u8, buf[1..2], self.msg.code(), .big);
+        buf[1] = self.msg.code();
         std.mem.writeInt(u16, buf[2..4], 0, .big);
         switch (self.msg) {
             .echo_reply, .echo => |msg| {
@@ -138,7 +138,7 @@ pub fn init() !void {
 fn input(ip_hdr: *const ip.IpHdr, data: []const u8, iface: *ip.IpIface) !void {
     const icmp_hdr = try IcmpHdr.decode(data);
     util.debugf(@src(), "{f} => {f}, len={d}", .{ ip_hdr.src, ip_hdr.dst, data.len });
-    std.debug.print("{f}", .{icmp_hdr});
+    util.dumpf("{f}", .{icmp_hdr});
     switch (icmp_hdr.msg) {
         .echo => |msg| {
             // Responds with the address of the received interface.
@@ -158,6 +158,6 @@ pub fn output(msg: IcmpMessage, data: []const u8, src: ip.IpAddr, dst: ip.IpAddr
         return error.IcmpEncodeFailure;
     };
     util.debugf(@src(), "{f} => {f}, len={d}", .{ src, dst, packet.len });
-    std.debug.print("{f}", .{hdr});
+    util.dumpf("{f}", .{hdr});
     return try ip.output(.icmp, packet, src, dst);
 }

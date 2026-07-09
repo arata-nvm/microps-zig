@@ -47,15 +47,22 @@ fn tasksDel(task: *Task) void {
 }
 
 /// NOTE: This function is not thread-safe. The caller must hold the mutex before calling this function.
-pub fn taskSleep(task: *Task, mutex: *platform.Lock, abstime: ?*const std.c.timespec) error{ Interrupted, Timeout }!void {
+pub fn taskSleep(task: *Task, mutex: *platform.Lock, timeout: ?std.Io.Duration) !void {
     if (task.interrupted) {
         return error.Interrupted;
     }
     task.wc += 1;
     tasksAdd(task);
     var timed_out = false;
-    if (abstime) |ts| {
-        timed_out = std.c.pthread_cond_timedwait(&task.cond, &mutex.inner, ts) == .TIMEDOUT;
+    if (timeout) |d| {
+        var ts: std.c.timespec = undefined;
+        _ = std.c.clock_gettime(.REALTIME, &ts);
+        const total = ts.sec * std.time.ns_per_s + ts.nsec + d.toNanoseconds();
+        const abs: std.c.timespec = .{
+            .sec = @intCast(@divTrunc(total, std.time.ns_per_s)),
+            .nsec = @intCast(@mod(total, std.time.ns_per_s)),
+        };
+        timed_out = std.c.pthread_cond_timedwait(&task.cond, &mutex.inner, &abs) == .TIMEDOUT;
     } else {
         _ = std.c.pthread_cond_wait(&task.cond, &mutex.inner);
     }

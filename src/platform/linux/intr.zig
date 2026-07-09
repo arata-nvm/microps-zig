@@ -25,7 +25,7 @@ const IrqEntry = struct {
 };
 
 /// NOTE: if you want to add/delete the entries after run(), you need to protect these lists with a mutex.
-var irqs: std.ArrayList(*IrqEntry) = .empty;
+var irqs: std.ArrayList(IrqEntry) = .empty;
 
 var thread: ?std.Thread = null;
 var barrier: std.c.sem_t = undefined;
@@ -51,14 +51,12 @@ pub fn register(irq: u32, isr: Isr, flags: IrqFlags, arg: ?*anyopaque) !void {
     }
 
     const allocator = platform.allocator;
-    const new = try allocator.create(IrqEntry);
-    new.* = .{
+    try irqs.append(allocator, .{
         .irq = irq,
         .isr = isr,
         .flags = flags,
         .arg = arg,
-    };
-    try irqs.append(allocator, new);
+    });
     std.posix.sigaddset(&sigmask, @enumFromInt(irq));
     util.infof(@src(), "success, irq={d}", .{irq});
 }
@@ -142,7 +140,7 @@ test "raise and dispatch" {
         }
     };
 
-    try init();
+    try platform.init(.{ .io = std.testing.io });
     try register(irqBase(), Context.isr, .{}, null);
     try run();
     try raise(irqBase());

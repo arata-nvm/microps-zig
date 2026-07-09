@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const arp = @import("arp.zig");
-const platform = @import("platform/linux/platform.zig");
+const platform = @import("platform.zig");
 const device = @import("device.zig");
 const icmp = @import("icmp.zig");
 const ip = @import("ip.zig");
@@ -17,7 +17,7 @@ pub const Protocol = struct {
     handler: ProtocolHandler,
 };
 
-var protocols: std.ArrayList(*Protocol) = .empty;
+var protocols: std.ArrayList(Protocol) = .empty;
 
 pub fn register(typ: ProtocolType, handler: ProtocolHandler) !void {
     for (protocols.items) |proto| {
@@ -27,19 +27,17 @@ pub fn register(typ: ProtocolType, handler: ProtocolHandler) !void {
         }
     }
 
-    const allocator = platform.allocator;
-    const proto = try allocator.create(Protocol);
-    errdefer allocator.destroy(proto);
-
-    proto.type = typ;
-    proto.handler = handler;
-    try protocols.append(allocator, proto);
+    const allocator = platform.allocator();
+    try protocols.append(allocator, .{
+        .type = typ,
+        .handler = handler,
+    });
 
     util.infof(@src(), "success, type={t}", .{typ});
 }
 
 pub fn input(typ: ProtocolType, data: []const u8, dev: *device.Device) !void {
-    util.debugf(@src(), "dev={s}, type={x:0>4}, len={d}", .{ dev.name(), typ, data.len });
+    util.debugf(@src(), "dev={s}, type=0x{x:0>4}, len={d}", .{ dev.name(), typ, data.len });
     util.debugdump(data);
     for (protocols.items) |proto| {
         if (proto.type == typ) {
@@ -50,9 +48,9 @@ pub fn input(typ: ProtocolType, data: []const u8, dev: *device.Device) !void {
     // allow unsupported protocols
 }
 
-pub fn init() !void {
+pub fn init(options: platform.InitOptions) !void {
     util.infof(@src(), "initialize...", .{});
-    platform.init() catch |err| {
+    platform.init(options) catch |err| {
         util.errorf(@src(), "platform.init() failure: {t}", .{err});
         return err;
     };

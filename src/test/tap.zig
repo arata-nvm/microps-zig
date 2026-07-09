@@ -3,13 +3,10 @@ const linux = std.os.linux;
 
 const microps = @import("microps");
 const ether = microps.ether;
+const ether_tap = microps.platform.driver.ether_tap;
 const util = microps.util;
 
 const CLONE_DEVICE = "/dev/net/tun";
-
-const IFF_TAP: u16 = 0x0002;
-const IFF_NO_PI: u16 = 0x1000;
-const TUNSETIFF: u32 = 0x400454ca;
 
 pub fn main(init: std.process.Init) !void {
     const arena = init.arena.allocator();
@@ -34,9 +31,9 @@ pub fn main(init: std.process.Init) !void {
 
     var ifr = std.mem.zeroes(linux.ifreq);
     @memcpy(ifr.ifrn.name[0..ifname.len], ifname);
-    ifr.ifru.flags = @bitCast(IFF_TAP | IFF_NO_PI);
+    ifr.ifru.flags = @bitCast(ether_tap.IFF_TAP | ether_tap.IFF_NO_PI);
 
-    switch (std.posix.errno(linux.ioctl(fd, TUNSETIFF, @intFromPtr(&ifr)))) {
+    switch (std.posix.errno(linux.ioctl(fd, ether_tap.TUNSETIFF, @intFromPtr(&ifr)))) {
         .SUCCESS => {},
         else => |e| {
             util.errorf(@src(), "ioctl: {t}", .{e});
@@ -56,7 +53,7 @@ pub fn main(init: std.process.Init) !void {
         const d = ether.EtherHdr.decode(buf[0..n]) catch {
             continue;
         };
-        std.debug.print("{f}", .{d.hdr});
+        util.dumpf("{f}", .{d.hdr});
         util.debugdump(buf[0..n]);
     }
 }

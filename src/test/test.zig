@@ -10,7 +10,7 @@ const net = microps.net;
 const platform = microps.platform;
 const util = microps.util;
 
-const ether_tap = platform.ether_tap;
+const ether_tap = platform.driver.ether_tap;
 
 // Scope of Internet host loopback address.
 //  - see https://tools.ietf.org/html/rfc5735
@@ -50,7 +50,7 @@ fn onSignal(signum: std.posix.SIG) callconv(.c) void {
     terminate.store(true, .seq_cst);
 }
 
-fn setup() !void {
+fn setup(options: platform.InitOptions) !void {
     var sa: std.posix.Sigaction = .{
         .handler = .{ .handler = onSignal },
         .mask = std.posix.sigemptyset(),
@@ -58,12 +58,10 @@ fn setup() !void {
     };
     std.posix.sigaction(std.posix.SIG.INT, &sa, null);
     util.infof(@src(), "setup protocol stack...", .{});
-    net.init() catch |err| {
+    net.init(options) catch |err| {
         util.errorf(@src(), "net.init() failure: {t}", .{err});
         return err;
     };
-
-    const allocator = platform.allocator;
 
     {
         const dev = loopback.init() catch |err| {
@@ -78,7 +76,7 @@ fn setup() !void {
             util.errorf(@src(), "IpAddr.fromString() failure: {t}", .{err});
             return err;
         };
-        const iface = ip.IpIface.create(allocator, unicast, netmask) catch |err| {
+        const iface = ip.IpIface.create(unicast, netmask) catch |err| {
             util.errorf(@src(), "IpIface.create() failure: {t}", .{err});
             return err;
         };
@@ -105,7 +103,7 @@ fn setup() !void {
             util.errorf(@src(), "IpAddr.fromString() failure: {t}", .{err});
             return err;
         };
-        const iface = ip.IpIface.create(allocator, unicast, netmask) catch |err| {
+        const iface = ip.IpIface.create(unicast, netmask) catch |err| {
             util.errorf(@src(), "IpIface.create() failure: {t}", .{err});
             return err;
         };
@@ -132,7 +130,7 @@ fn cleanup() !void {
 fn appMain(io: std.Io) !void {
     const src = try ip.IpAddr.fromString("192.0.2.2");
     const dst = try ip.IpAddr.fromString("192.0.2.1");
-    const id: u16 = @intCast(std.os.linux.getpid());
+    const id: u16 = @intCast(std.c.getpid());
 
     util.debugf(@src(), "press Ctrl+C to terminate", .{});
     var seq: u16 = 0;
@@ -147,9 +145,7 @@ fn appMain(io: std.Io) !void {
 }
 
 pub fn main(init: std.process.Init) !void {
-    const io = init.io;
-
-    try setup();
-    try appMain(io);
+    try setup(.{ .io = init.io, .gpa = init.arena.allocator() });
+    try appMain(init.io);
     try cleanup();
 }

@@ -6,7 +6,7 @@ pub const icmp = @import("icmp.zig");
 pub const ip = @import("ip.zig");
 pub const net = @import("net.zig");
 pub const util = @import("util.zig");
-pub const platform = @import("platform/linux/platform.zig");
+pub const platform = @import("platform.zig");
 
 test {
     _ = arp;

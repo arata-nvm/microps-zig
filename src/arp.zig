@@ -4,7 +4,7 @@ const device = @import("device.zig");
 const ether = @import("ether.zig");
 const ip = @import("ip.zig");
 const net = @import("net.zig");
-const platform = @import("platform/linux/platform.zig");
+const platform = @import("platform.zig");
 const util = @import("util.zig");
 
 // Hardware Types
@@ -166,7 +166,7 @@ const ArpCache = struct {
 
     const Entry = struct {
         pa: ip.IpAddr,
-        timestamp: std.c.timeval,
+        timestamp: std.Io.Timestamp,
         state: union(enum) {
             incomplete: void,
             resolved: ether.EtherAddr,
@@ -183,7 +183,7 @@ const ArpCache = struct {
     lock: platform.Lock = .{},
     entries: [cache_size]?Entry = @splat(null),
 
-    pub fn insert(self: *Self, pa: ip.IpAddr, ha: ether.EtherAddr, now: std.c.timeval) void {
+    pub fn insert(self: *Self, pa: ip.IpAddr, ha: ether.EtherAddr, now: std.Io.Timestamp) void {
         util.debugf(@src(), "INSERT: pa={f}, ha={f}", .{ pa, ha });
         self.lock.acquire();
         defer self.lock.release();
@@ -197,7 +197,7 @@ const ArpCache = struct {
         };
     }
 
-    pub fn update(self: *Self, pa: ip.IpAddr, ha: ether.EtherAddr, now: std.c.timeval) bool {
+    pub fn update(self: *Self, pa: ip.IpAddr, ha: ether.EtherAddr, now: std.Io.Timestamp) bool {
         util.debugf(@src(), "UPDATE: pa={f}, ha={f}", .{ pa, ha });
         self.lock.acquire();
         defer self.lock.release();
@@ -211,7 +211,7 @@ const ArpCache = struct {
         return true;
     }
 
-    pub fn resolve(self: *Self, pa: ip.IpAddr, now: std.c.timeval) ResolveResult {
+    pub fn resolve(self: *Self, pa: ip.IpAddr, now: std.Io.Timestamp) ResolveResult {
         self.lock.acquire();
         defer self.lock.release();
 
@@ -223,6 +223,7 @@ const ArpCache = struct {
             };
         }
 
+        util.debugf(@src(), "cache not found, pa={f}", .{pa});
         const entry = self.allocSlot();
         entry.* = .{
             .pa = pa,
@@ -232,7 +233,7 @@ const ArpCache = struct {
         return .miss;
     }
 
-    pub fn removeExpired(self: *Self, now: std.c.timeval) void {
+    pub fn removeExpired(self: *Self, now: std.Io.Timestamp) void {
         self.lock.acquire();
         defer self.lock.release();
 
@@ -241,7 +242,7 @@ const ArpCache = struct {
             if (e.state == .static) {
                 continue;
             }
-            if (util.timevalSub(now, e.timestamp).sec > timeout_sec) {
+            if (e.timestamp.durationTo(now).toSeconds() > timeout_sec) {
                 switch (e.state) {
                     .incomplete => {
                         util.debugf(@src(), "DELETE: pa={f}, state={t}", .{ e.pa, e.state });
@@ -268,7 +269,7 @@ const ArpCache = struct {
                 oldest = entry;
                 continue;
             };
-            if (util.timevalCmp(e.timestamp, o.timestamp) < 0) {
+            if (e.timestamp.nanoseconds < o.timestamp.nanoseconds) {
                 oldest = entry;
             }
         }
@@ -294,7 +295,7 @@ pub fn init() !void {
         util.errorf(@src(), "net.register() failure: {t}", .{err});
         return err;
     };
-    platform.timer.register(.{ .sec = 1, .usec = 0 }, timer) catch |err| {
+    platform.timer.register(.fromSeconds(1), timer) catch |err| {
         util.errorf(@src(), "platform.timer.register() failure: {t}", .{err});
         return err;
     };
@@ -306,10 +307,10 @@ fn input(data: []const u8, dev: *device.Device) !void {
         return err;
     };
     util.debugf(@src(), "dev={s}, len={d}", .{ dev.name(), data.len });
-    std.debug.print("{f}", .{msg});
+    util.dumpf("{f}", .{msg});
     util.debugdump(data);
 
-    const now = util.timevalNow();
+    const now = platform.now();
     const merged = cache.update(msg.spa, msg.sha, now);
     const iface = dev.getIface(ip.IpIface) orelse return;
     if (iface.unicast.eql(msg.tpa)) {
@@ -331,7 +332,7 @@ fn request(iface: *ip.IpIface, tpa: ip.IpAddr) !void {
         tpa,
     );
     util.debugf(@src(), "dev={s}, len={d}", .{ iface.dev().name(), ArpEtherIp.size });
-    std.debug.print("{f}", .{msg});
+    util.dumpf("{f}", .{msg});
 
     var buf: [ArpEtherIp.size]u8 = undefined;
     try msg.encode(&buf);
@@ -348,7 +349,7 @@ fn reply(iface: *ip.IpIface, tha: ether.EtherAddr, tpa: ip.IpAddr, dst: ether.Et
         tpa,
     );
     util.debugf(@src(), "dev={s}, len={d}", .{ iface.dev().name(), ArpEtherIp.size });
-    std.debug.print("{f}", .{msg});
+    util.dumpf("{f}", .{msg});
 
     var buf: [ArpEtherIp.size]u8 = undefined;
     try msg.encode(&buf);
@@ -362,7 +363,7 @@ pub fn resolve(iface: *ip.IpIface, pa: ip.IpAddr) !ether.EtherAddr {
         return error.ArpUnsupportedHrd;
     }
 
-    const now = util.timevalNow();
+    const now = platform.now();
     switch (cache.resolve(pa, now)) {
         .miss, .waiting => {
             try request(iface, pa);
@@ -376,6 +377,6 @@ pub fn resolve(iface: *ip.IpIface, pa: ip.IpAddr) !ether.EtherAddr {
 }
 
 fn timer() void {
-    const now = util.timevalNow();
+    const now = platform.now();
     cache.removeExpired(now);
 }
