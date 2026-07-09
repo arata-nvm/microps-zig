@@ -204,7 +204,7 @@ const ArpCache = struct {
 
         const entry = self.findSlot(pa) orelse return false;
         if (entry.state == .static) {
-            return false;
+            return true;
         }
         entry.timestamp = now;
         entry.state = .{ .resolved = ha };
