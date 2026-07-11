@@ -113,6 +113,6 @@ pub const EtherHdr = struct {
     ) !void {
         try writer.print("        src: {f}\n", .{self.src});
         try writer.print("        dst: {f}\n", .{self.dst});
-        try writer.print("       type: {d} ({t})\n", .{ self.type, self.type });
+        try writer.print("       type: 0x{x:0>4} ({t})\n", .{ self.type, self.type });
     }
 };

@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const net = @import("../../net.zig");
+
 pub const intr = @import("intr.zig");
 pub const timer = @import("timer.zig");
 pub const sched = @import("sched.zig");
@@ -30,6 +32,7 @@ pub fn init(options: InitOptions) !void {
     started = now();
 
     try intr.init();
+    try intr.registerTyped(void, intr.irq_soft, net.sortirq_handler, .{}, undefined);
     try timer.init();
 }
 

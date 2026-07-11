@@ -91,39 +91,54 @@ pub fn Queue(comptime T: type) type {
         tail: ?*Entry = null,
         num: usize = 0,
 
-        pub fn push(self: *Self, entry: *Entry) void {
-            entry.next = null;
+        pub fn push(self: *Self, data: T) !void {
+            const allocator = platform.allocator();
+            const entry = try allocator.create(Entry);
+            entry.* = .{
+                .next = null,
+                .data = data,
+            };
+
+            if (self.head == null) {
+                self.head = entry;
+            }
+
             if (self.tail) |tail| {
                 tail.next = entry;
             }
             self.tail = entry;
-            if (self.head == null) {
-                self.head = entry;
-            }
+
             self.num += 1;
         }
 
-        pub fn pop(self: *Self) ?*Entry {
+        pub fn pop(self: *Self) ?T {
             const entry = self.head orelse return null;
+            const data = entry.data;
+
             self.head = entry.next;
             if (self.head == null) {
                 self.tail = null;
             }
             self.num -= 1;
-            return entry;
+
+            const allocator = platform.allocator();
+            allocator.destroy(entry);
+
+            return data;
         }
 
-        pub fn peek(self: *Self) ?*Entry {
-            return self.head;
+        pub fn peek(self: *Self) ?T {
+            const head = self.head orelse return null;
+            return head.data;
         }
 
         pub const Iterator = struct {
             entry: ?*Entry,
 
-            pub fn next(self: *Iterator) ?*Entry {
+            pub fn next(self: *Iterator) ?T {
                 const entry = self.entry orelse return null;
                 self.entry = entry.next;
-                return entry;
+                return entry.data;
             }
         };
 
@@ -152,24 +167,24 @@ pub fn cksum16(data: []const u8, init: u32) u16 {
 test "queue" {
     const Q = Queue(u32);
     var queue: Q = .{};
-    var entries = [_]Q.Entry{ .{ .data = 1 }, .{ .data = 2 }, .{ .data = 3 } };
+    var entries = [_]u32{ 1, 2, 3 };
 
     try std.testing.expectEqual(null, queue.pop());
-    for (&entries) |*entry| {
-        queue.push(entry);
+    for (&entries) |entry| {
+        try queue.push(entry);
     }
     try std.testing.expectEqual(3, queue.num);
-    try std.testing.expectEqual(1, queue.peek().?.data);
+    try std.testing.expectEqual(1, queue.peek().?);
 
     var it = queue.iterator();
     var expected: u32 = 1;
     while (it.next()) |entry| : (expected += 1) {
-        try std.testing.expectEqual(expected, entry.data);
+        try std.testing.expectEqual(expected, entry);
     }
 
-    try std.testing.expectEqual(1, queue.pop().?.data);
-    try std.testing.expectEqual(2, queue.pop().?.data);
-    try std.testing.expectEqual(3, queue.pop().?.data);
+    try std.testing.expectEqual(1, queue.pop().?);
+    try std.testing.expectEqual(2, queue.pop().?);
+    try std.testing.expectEqual(3, queue.pop().?);
     try std.testing.expectEqual(null, queue.pop());
     try std.testing.expectEqual(0, queue.num);
 }
