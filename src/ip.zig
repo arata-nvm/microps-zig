@@ -10,7 +10,7 @@ const util = @import("util.zig");
 const version_v4 = 4;
 
 const total_size_max = std.math.maxInt(u16);
-pub const payload_size_max = total_size_max - IpHdr.size_min;
+pub const payload_size_max = total_size_max - IpHdr.hdr_len_min;
 
 const IpHdrFlags = packed struct(u3) {
     const Self = @This();
@@ -37,8 +37,8 @@ pub const IpAddr = struct {
     pub const any = IpAddr{ .addr = 0x00000000 };
     pub const broadcast = IpAddr{ .addr = 0xffffffff };
 
-    pub fn fromBytes(bytes: [len]u8) IpAddr {
-        return IpAddr{ .addr = std.mem.readInt(u32, &bytes, .big) };
+    pub fn fromBytes(bytes: *const [len]u8) IpAddr {
+        return IpAddr{ .addr = std.mem.readInt(u32, bytes, .big) };
     }
 
     pub fn toBytes(self: Self) [len]u8 {
@@ -55,7 +55,7 @@ pub const IpAddr = struct {
             p.* = std.fmt.parseInt(u8, tok, 10) catch return error.IpAddrParseError;
         }
         if (it.next() != null) return error.IpAddrParseError;
-        return fromBytes(parts);
+        return fromBytes(&parts);
     }
 
     pub fn eql(self: Self, other: Self) bool {
@@ -91,9 +91,18 @@ pub const IpAddr = struct {
 pub const IpHdr = struct {
     const Self = @This();
 
-    pub const size_min = 20;
-    const size_max = 60;
-    const offset_mask = 0x1fff;
+    pub const hdr_len_min = 20;
+    const hdr_len_max = 60;
+
+    const Vhl = packed struct(u8) {
+        hlen_4byte: u4,
+        version: u4,
+    };
+
+    const FlagsOffset = packed struct(u16) {
+        offset: u13,
+        flags: IpHdrFlags,
+    };
 
     version: u4,
     hlen_4byte: u4,
@@ -112,31 +121,45 @@ pub const IpHdr = struct {
         return @as(u16, self.hlen_4byte) << 2;
     }
 
-    pub fn decode(packet: []const u8) !Self {
-        if (packet.len < size_min) {
-            util.errorf(@src(), "too short, len={d}", .{packet.len});
-            return error.IpPacketTooShort;
-        }
-        const protocol = std.enums.fromInt(IpProtocolType, packet[9]) orelse {
-            util.errorf(@src(), "unknown protocol: {d}", .{packet[9]});
-            return error.IpUnknownProtocol;
-        };
+    pub const Decoded = struct {
+        hdr: Self,
+        payload: []const u8,
+    };
+
+    pub fn decode(packet: []const u8) !Decoded {
+        var r: std.Io.Reader = .fixed(packet);
+        const vhl: Vhl = @bitCast(try r.takeByte());
+        const tos = try r.takeByte();
+        const total = try r.takeInt(u16, .big);
+        const id = try r.takeInt(u16, .big);
+        const flags_offset: FlagsOffset = @bitCast(try r.takeInt(u16, .big));
+        const ttl = try r.takeByte();
+        const protocol_int = try r.takeByte();
+        const sum = try r.takeInt(u16, .big);
+        const src: IpAddr = .fromBytes(try r.takeArray(IpAddr.len));
+        const dst: IpAddr = .fromBytes(try r.takeArray(IpAddr.len));
         const self = Self{
-            .version = @intCast(packet[0] >> 4),
-            .hlen_4byte = @intCast(packet[0] & 0x0f),
-            .tos = packet[1],
-            .total = std.mem.readInt(u16, packet[2..4], .big),
-            .id = std.mem.readInt(u16, packet[4..6], .big),
-            .flags = @bitCast(@as(u3, @truncate(std.mem.readInt(u16, packet[6..8], .big) >> 13))),
-            .offset = @intCast(std.mem.readInt(u16, packet[6..8], .big) & offset_mask),
-            .ttl = packet[8],
-            .protocol = protocol,
-            .sum = std.mem.readInt(u16, packet[10..12], .big),
-            .src = IpAddr.fromBytes(packet[12..16].*),
-            .dst = IpAddr.fromBytes(packet[16..20].*),
+            .version = vhl.version,
+            .hlen_4byte = vhl.hlen_4byte,
+            .tos = tos,
+            .total = total,
+            .id = id,
+            .flags = flags_offset.flags,
+            .offset = flags_offset.offset,
+            .ttl = ttl,
+            .protocol = std.enums.fromInt(IpProtocolType, protocol_int) orelse {
+                util.errorf(@src(), "unknown protocol: {d}", .{protocol_int});
+                return error.IpUnknownProtocol;
+            },
+            .sum = sum,
+            .src = src,
+            .dst = dst,
         };
         try self.validate(packet);
-        return self;
+        return .{
+            .hdr = self,
+            .payload = packet[self.hlen()..self.total],
+        };
     }
 
     fn validate(self: Self, packet: []const u8) !void {
@@ -162,25 +185,21 @@ pub const IpHdr = struct {
         }
     }
 
-    pub fn encode(self: *Self, buf: []u8) !void {
-        if (buf.len < self.hlen()) {
-            util.errorf(@src(), "buffer too short: len={d} < hlen={d}", .{ buf.len, self.hlen() });
-            return error.IpBufferTooShort;
-        }
-
-        buf[0] = (@as(u8, self.version) << 4) | self.hlen_4byte;
-        buf[1] = self.tos;
-        std.mem.writeInt(u16, buf[2..4], self.total, .big);
-        std.mem.writeInt(u16, buf[4..6], self.id, .big);
-        std.mem.writeInt(u16, buf[6..8], (@as(u16, @as(u3, @bitCast(self.flags))) << 13) | self.offset, .big);
-        buf[8] = self.ttl;
-        buf[9] = @intFromEnum(self.protocol);
-        std.mem.writeInt(u16, buf[10..12], 0, .big);
-        std.mem.writeInt(u32, buf[12..16], self.src.addr, .big);
-        std.mem.writeInt(u32, buf[16..20], self.dst.addr, .big);
-        std.debug.assert(self.hlen() == size_min);
-        self.sum = util.cksum16(buf[0..self.hlen()], 0);
-        std.mem.writeInt(u16, buf[10..12], self.sum, .big);
+    pub fn encode(self: Self, w: *std.Io.Writer) !void {
+        std.debug.assert(self.hlen() == hdr_len_min);
+        const start = w.buffered().len;
+        try w.writeByte(@bitCast(Vhl{ .hlen_4byte = self.hlen_4byte, .version = self.version }));
+        try w.writeByte(self.tos);
+        try w.writeInt(u16, self.total, .big);
+        try w.writeInt(u16, self.id, .big);
+        try w.writeInt(u16, @bitCast(FlagsOffset{ .offset = self.offset, .flags = self.flags }), .big);
+        try w.writeByte(self.ttl);
+        try w.writeByte(@intFromEnum(self.protocol));
+        try w.writeInt(u16, 0, .big);
+        try w.writeAll(&self.src.toBytes());
+        try w.writeAll(&self.dst.toBytes());
+        const hdr_bytes = w.buffered()[start..];
+        std.mem.writeInt(u16, hdr_bytes[10..12], util.cksum16(hdr_bytes, 0), .big);
     }
 
     pub fn format(self: Self, writer: *std.Io.Writer) !void {
@@ -285,7 +304,8 @@ pub fn registerProtocol(typ: IpProtocolType, handler: IpProtocolHandler) !void {
 fn input(data: []const u8, dev: *device.Device) !void {
     util.debugf(@src(), "dev={s}, len={d}", .{ dev.name(), data.len });
     util.debugdump(data);
-    const hdr = try IpHdr.decode(data);
+    const d = try IpHdr.decode(data);
+    const hdr = d.hdr;
     if (hdr.flags.mf or hdr.offset != 0) {
         util.errorf(@src(), "fragments does not supported", .{});
         return error.IpFragmentedPacketNotSupported;
@@ -302,7 +322,7 @@ fn input(data: []const u8, dev: *device.Device) !void {
     util.dumpf("{f}", .{hdr});
     for (protocols.items) |proto| {
         if (proto.type == hdr.protocol) {
-            try proto.handler(&hdr, data[hdr.hlen()..hdr.total], iface);
+            try proto.handler(&hdr, d.payload, iface);
             return;
         }
     }
@@ -328,8 +348,8 @@ pub fn output(protocol: IpProtocolType, data: []const u8, src: IpAddr, dst: IpAd
         util.errorf(@src(), "unable to output with specified source address, src={f}", .{src});
         return error.IpSourceAddressNotAvailable;
     }
-    if (iface.dev().mtu < IpHdr.size_min + data.len) {
-        util.errorf(@src(), "too long, dev={s}, mtu={d} < len={d}", .{ iface.dev().name(), iface.dev().mtu, IpHdr.size_min + data.len });
+    if (iface.dev().mtu < IpHdr.hdr_len_min + data.len) {
+        util.errorf(@src(), "too long, dev={s}, mtu={d} < len={d}", .{ iface.dev().name(), iface.dev().mtu, IpHdr.hdr_len_min + data.len });
         return error.IpPayloadTooLarge;
     }
 
@@ -375,16 +395,12 @@ fn outputDevice(iface: *IpIface, data: []const u8, target: IpAddr) !void {
 }
 
 fn buildPacket(buf: []u8, protocol: IpProtocolType, data: []const u8, id: u16, offset: u13, src: IpAddr, dst: IpAddr) ![]const u8 {
-    const hlen = IpHdr.size_min;
-    const total = hlen + data.len;
-    if (buf.len < total) {
-        return error.IpBufferTooShort;
-    }
-    var hdr = IpHdr{
+    const hlen = IpHdr.hdr_len_min;
+    const hdr = IpHdr{
         .version = version_v4,
         .hlen_4byte = hlen >> 2,
         .tos = 0,
-        .total = @intCast(total),
+        .total = @intCast(hlen + data.len),
         .id = id,
         .flags = .{},
         .offset = offset,
@@ -393,10 +409,13 @@ fn buildPacket(buf: []u8, protocol: IpProtocolType, data: []const u8, id: u16, o
         .src = src,
         .dst = dst,
     };
-    try hdr.encode(buf);
-    @memcpy(buf[hlen..total], data);
-    util.dumpf("{f}", .{hdr});
-    return buf[0..total];
+    var w: std.Io.Writer = .fixed(buf);
+    try hdr.encode(&w);
+    try w.writeAll(data);
+    const packet = w.buffered();
+    const d = try IpHdr.decode(packet);
+    util.dumpf("{f}", .{d.hdr});
+    return packet;
 }
 
 pub const route = struct {
@@ -479,8 +498,9 @@ test "IpHdr round-trip" {
         0x23, 0x24, 0x25, 0x5e,
         0x26, 0x2a, 0x28, 0x29,
     };
-    var hdr = try IpHdr.decode(&packet);
-    var buf: [IpHdr.size_min]u8 = undefined;
-    try hdr.encode(&buf);
-    try std.testing.expectEqualSlices(u8, packet[0..IpHdr.size_min], &buf);
+    const d = try IpHdr.decode(&packet);
+    var buf: [IpHdr.hdr_len_min]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try d.hdr.encode(&w);
+    try std.testing.expectEqualSlices(u8, packet[0..IpHdr.hdr_len_min], w.buffered());
 }

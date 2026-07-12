@@ -44,68 +44,65 @@ const IcmpMessage = union(IcmpType) {
 const IcmpHdr = struct {
     const Self = @This();
 
-    const size_min = 8;
-
     sum: u16 = 0,
     msg: IcmpMessage,
 
-    pub fn decode(data: []const u8) !Self {
-        if (data.len < size_min) {
-            util.errorf(@src(), "too short", .{});
-            return error.IpPacketTooShort;
-        }
-        if (util.cksum16(data, 0) != 0) {
-            util.errorf(@src(), "checksum error", .{});
-            return error.IcmpChecksumError;
-        }
+    pub const Decoded = struct {
+        hdr: Self,
+        payload: []const u8,
+    };
 
-        const typ: IcmpType = std.enums.fromInt(IcmpType, data[0]) orelse {
-            util.errorf(@src(), "unknown type: {d}", .{data[0]});
+    pub fn decode(data: []const u8) !Decoded {
+        var r: std.Io.Reader = .fixed(data);
+        const type_int = try r.takeByte();
+        const code_int = try r.takeByte();
+        const sum = try r.takeInt(u16, .big);
+
+        const typ: IcmpType = std.enums.fromInt(IcmpType, type_int) orelse {
+            util.errorf(@src(), "unknown type: {d}", .{type_int});
             return error.IcmpUnknownType;
         };
         const msg: IcmpMessage = switch (typ) {
             inline .echo_reply, .echo => |t| @unionInit(IcmpMessage, @tagName(t), .{
-                .id = std.mem.readInt(u16, data[4..6], .big),
-                .seq = std.mem.readInt(u16, data[6..8], .big),
+                .id = try r.takeInt(u16, .big),
+                .seq = try r.takeInt(u16, .big),
             }),
             inline .dest_unreachable => |t| @unionInit(IcmpMessage, @tagName(t), .{
-                .code = std.enums.fromInt(IcmpDestUnreachableCode, data[1]) orelse {
-                    util.errorf(@src(), "unknown dest_unreachable code: {d}", .{data[1]});
+                .code = std.enums.fromInt(IcmpDestUnreachableCode, code_int) orelse {
+                    util.errorf(@src(), "unknown dest_unreachable code: {d}", .{code_int});
                     return error.IcmpUnknownDestUnreachableCode;
                 },
-                .unused = std.mem.readInt(u32, data[4..8], .big),
+                .unused = try r.takeInt(u32, .big),
             }),
         };
-        return Self{
-            .sum = std.mem.readInt(u16, data[2..4], .big),
-            .msg = msg,
+        if (util.cksum16(data, 0) != 0) {
+            util.errorf(@src(), "checksum error", .{});
+            return error.IcmpChecksumError;
+        }
+        return .{
+            .hdr = .{ .sum = sum, .msg = msg },
+            .payload = r.buffered(),
         };
     }
 
-    pub fn encode(self: *Self, buf: []u8, payload: []const u8) ![]const u8 {
-        const msg_size = IcmpHdr.size_min + payload.len;
-        if (buf.len < msg_size) {
-            util.errorf(@src(), "buffer too short: len={d} < msg_size={d}", .{ buf.len, msg_size });
-            return error.IpBufferTooShort;
-        }
-
-        buf[0] = @intFromEnum(self.msg);
-        buf[1] = self.msg.code();
-        std.mem.writeInt(u16, buf[2..4], 0, .big);
+    pub fn encode(self: Self, w: *std.Io.Writer, payload: []const u8) !void {
+        const start = w.buffered().len;
+        try w.writeByte(@intFromEnum(self.msg));
+        try w.writeByte(self.msg.code());
+        try w.writeInt(u16, 0, .big);
         switch (self.msg) {
             .echo_reply, .echo => |msg| {
-                std.mem.writeInt(u16, buf[4..6], msg.id, .big);
-                std.mem.writeInt(u16, buf[6..8], msg.seq, .big);
+                try w.writeInt(u16, msg.id, .big);
+                try w.writeInt(u16, msg.seq, .big);
             },
             .dest_unreachable => |msg| {
-                std.mem.writeInt(u32, buf[4..8], msg.unused, .big);
+                try w.writeInt(u32, msg.unused, .big);
             },
         }
-        @memcpy(buf[IcmpHdr.size_min..msg_size], payload);
+        try w.writeAll(payload);
 
-        self.sum = util.cksum16(buf[0..msg_size], 0);
-        std.mem.writeInt(u16, buf[2..4], self.sum, .big);
-        return buf[0..msg_size];
+        const msg_bytes = w.buffered()[start..];
+        std.mem.writeInt(u16, msg_bytes[2..4], util.cksum16(msg_bytes, 0), .big);
     }
 
     pub fn format(
@@ -136,14 +133,14 @@ pub fn init() !void {
 }
 
 fn input(ip_hdr: *const ip.IpHdr, data: []const u8, iface: *ip.IpIface) !void {
-    const icmp_hdr = try IcmpHdr.decode(data);
+    const d = try IcmpHdr.decode(data);
     util.debugf(@src(), "{f} => {f}, len={d}", .{ ip_hdr.src, ip_hdr.dst, data.len });
-    util.dumpf("{f}", .{icmp_hdr});
+    util.dumpf("{f}", .{d.hdr});
     util.debugdump(data);
-    switch (icmp_hdr.msg) {
+    switch (d.hdr.msg) {
         .echo => |msg| {
             // Responds with the address of the received interface.
-            _ = try output(.{ .echo_reply = msg }, data[IcmpHdr.size_min..], iface.unicast, ip_hdr.src);
+            _ = try output(.{ .echo_reply = msg }, d.payload, iface.unicast, ip_hdr.src);
         },
         else => {
             // ignore
@@ -153,12 +150,15 @@ fn input(ip_hdr: *const ip.IpHdr, data: []const u8, iface: *ip.IpIface) !void {
 
 pub fn output(msg: IcmpMessage, data: []const u8, src: ip.IpAddr, dst: ip.IpAddr) !usize {
     var buf: [buf_size]u8 = undefined;
-    var hdr = IcmpHdr{ .msg = msg };
-    const packet = hdr.encode(&buf, data) catch |err| {
+    var w: std.Io.Writer = .fixed(&buf);
+    const hdr = IcmpHdr{ .msg = msg };
+    hdr.encode(&w, data) catch |err| {
         util.errorf(@src(), "IcmpHdr.encode() failure: err={t}", .{err});
         return error.IcmpEncodeFailure;
     };
+    const packet = w.buffered();
     util.debugf(@src(), "{f} => {f}, len={d}", .{ src, dst, packet.len });
-    util.dumpf("{f}", .{hdr});
+    const d = try IcmpHdr.decode(packet);
+    util.dumpf("{f}", .{d.hdr});
     return try ip.output(.icmp, packet, src, dst);
 }

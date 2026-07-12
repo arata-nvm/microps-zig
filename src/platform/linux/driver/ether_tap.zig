@@ -64,7 +64,7 @@ pub fn init(name: []const u8, addr: ?ether.EtherAddr) !*device.Device {
             .ethernet,
             ether.payload_size_max,
             .{ .broadcast = true, .need_arp = true },
-            ether.EtherHdr.size,
+            ether.EtherHdr.hdr_len,
             ether.EtherAddr.len,
             ops,
         ),
@@ -145,13 +145,13 @@ fn open(dev: *device.Device) !void {
         return err;
     };
 
-    var addr = ether.EtherAddr.fromBytes(dev.addr[0..ether.EtherAddr.len].*);
+    var addr = ether.EtherAddr.fromBytes(dev.addr[0..ether.EtherAddr.len]);
     if (addr.eql(ether.EtherAddr.any)) {
         setDefaultAddr(dev) catch |err| {
             util.errorf(@src(), "setDefaultAddr() failure: {t}, dev={s}", .{ err, dev.name() });
             return err;
         };
-        addr = ether.EtherAddr.fromBytes(dev.addr[0..ether.EtherAddr.len].*);
+        addr = ether.EtherAddr.fromBytes(dev.addr[0..ether.EtherAddr.len]);
     }
 
     const ts = linux.timespec{ .sec = 0, .nsec = 100 * std.time.ns_per_ms };
@@ -179,16 +179,17 @@ fn output(dev: *device.Device, typ: net.ProtocolType, data: []const u8, dst: ?[]
     }
 
     const hdr = ether.EtherHdr{
-        .src = ether.EtherAddr.fromBytes(dev.addr[0..ether.EtherAddr.len].*),
-        .dst = ether.EtherAddr.fromBytes(dst_addr[0..ether.EtherAddr.len].*),
+        .src = ether.EtherAddr.fromBytes(dev.addr[0..ether.EtherAddr.len]),
+        .dst = ether.EtherAddr.fromBytes(dst_addr[0..ether.EtherAddr.len]),
         .type = typ,
     };
 
     var frame: [ether.frame_max]u8 = undefined;
-    const offset = try hdr.encode(&frame);
-    @memcpy(frame[offset .. offset + data.len], data);
+    var w: std.Io.Writer = .fixed(&frame);
+    try hdr.encode(&w);
+    try w.writeAll(data);
 
-    const frame_len = offset + @max(data.len, ether.payload_size_min);
+    const frame_len = @max(w.buffered().len, ether.frame_min);
     util.debugf(@src(), "dev={s}, type=0x{x:0>4}, len={d}", .{ dev.name(), typ, frame_len });
     util.dumpf("{f}", .{hdr});
 
@@ -206,7 +207,7 @@ fn input(dev: *device.Device, frame: []const u8) !void {
     };
 
     const dst = d.hdr.dst;
-    const addr = ether.EtherAddr.fromBytes(dev.addr[0..ether.EtherAddr.len].*);
+    const addr = ether.EtherAddr.fromBytes(dev.addr[0..ether.EtherAddr.len]);
     if (!dst.eql(addr)) {
         if (!dst.eql(ether.EtherAddr.broadcast)) {
             // for other host

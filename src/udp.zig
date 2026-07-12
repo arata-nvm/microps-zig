@@ -3,21 +3,19 @@ const std = @import("std");
 const ip = @import("ip.zig");
 const util = @import("util.zig");
 
-const Port = struct {
-    const Self = @This();
+const Port = enum(u16) {
+    _,
 
     // Dynamic Source Ports
     //  - see https://tools.ietf.org/html/rfc6335
-    pub const dynamic_min = 49152;
-    pub const dynamic_max = 65535;
-
-    port: u16,
+    pub const dynamic_min: Port = @enumFromInt(49152);
+    pub const dynamic_max: Port = @enumFromInt(65535);
 
     pub fn format(
         self: @This(),
         writer: *std.Io.Writer,
     ) std.Io.Writer.Error!void {
-        try writer.print("{d}", .{self.port});
+        try writer.print("{d}", .{@intFromEnum(self)});
     }
 };
 
@@ -31,7 +29,7 @@ const SocketAddr = struct {
         const i = std.mem.indexOfScalar(u8, s, ':') orelse return error.InvalidAddress;
         return .{
             .addr = try ip.IpAddr.fromString(s[0..i]),
-            .port = .{ .port = try std.fmt.parseInt(u16, s[i + 1 ..], 10) },
+            .port = @enumFromInt(try std.fmt.parseInt(u16, s[i + 1 ..], 10)),
         };
     }
 
@@ -52,50 +50,61 @@ const UdpHdr = struct {
 
     src: SocketAddr,
     dst: SocketAddr,
-    len: u16,
+    total: u16,
     sum: u16,
 
     const PseudoHdr = struct {
-        const Self = @This();
-
-        const hdr_len = 12;
-
         src: ip.IpAddr,
         dst: ip.IpAddr,
         zero: u8,
         proto: ip.IpProtocolType,
         len: u16,
 
+        const Raw = extern struct {
+            src: [ip.IpAddr.len]u8,
+            dst: [ip.IpAddr.len]u8,
+            zero: u8,
+            proto: u8,
+            len: u16,
+        };
+
+        comptime {
+            std.debug.assert(@sizeOf(Raw) == 12);
+        }
+
         pub fn cksum16(self: PseudoHdr) u16 {
-            var buf: [PseudoHdr.hdr_len]u8 = undefined;
-            buf[0..4].* = self.src.toBytes();
-            buf[4..8].* = self.dst.toBytes();
-            buf[8] = self.zero;
-            buf[9] = @intFromEnum(self.proto);
-            std.mem.writeInt(u16, buf[10..12], self.len, .big);
-            return ~util.cksum16(&buf, 0);
+            const raw = Raw{
+                .src = self.src.toBytes(),
+                .dst = self.dst.toBytes(),
+                .zero = self.zero,
+                .proto = @intFromEnum(self.proto),
+                .len = std.mem.nativeToBig(u16, self.len),
+            };
+            return ~util.cksum16(std.mem.asBytes(&raw), 0);
         }
     };
 
-    pub fn decode(data: []const u8, ip_hdr: *const ip.IpHdr) !Self {
-        if (data.len < hdr_len) {
-            util.errorf(@src(), "too short", .{});
-            return error.UdpTooShort;
-        }
+    pub const Decoded = struct {
+        hdr: Self,
+        payload: []const u8,
+    };
+
+    pub fn decode(data: []const u8, ip_hdr: *const ip.IpHdr) !Decoded {
+        var r: std.Io.Reader = .fixed(data);
         const hdr: UdpHdr = .{
             .src = .{
                 .addr = ip_hdr.src,
-                .port = .{ .port = std.mem.readInt(u16, data[0..2], .big) },
+                .port = @enumFromInt(try r.takeInt(u16, .big)),
             },
             .dst = .{
                 .addr = ip_hdr.dst,
-                .port = .{ .port = std.mem.readInt(u16, data[2..4], .big) },
+                .port = @enumFromInt(try r.takeInt(u16, .big)),
             },
-            .len = std.mem.readInt(u16, data[4..6], .big),
-            .sum = std.mem.readInt(u16, data[6..8], .big),
+            .total = try r.takeInt(u16, .big),
+            .sum = try r.takeInt(u16, .big),
         };
-        if (data.len < hdr.len) {
-            util.errorf(@src(), "length error: len={d} < hdr.len={d}", .{ data.len, hdr.len });
+        if (hdr.total < hdr_len or data.len < hdr.total) {
+            util.errorf(@src(), "length error: len={d}, total={d}", .{ data.len, hdr.total });
             return error.UdpLengthError;
         }
         if (hdr.sum != 0) {
@@ -104,15 +113,17 @@ const UdpHdr = struct {
                 .dst = ip_hdr.dst,
                 .zero = 0,
                 .proto = .udp,
-                .len = hdr.len,
+                .len = hdr.total,
             };
-            const psum = pseudo_hdr.cksum16();
-            if (util.cksum16(data[0..hdr.len], psum) != 0) {
+            if (util.cksum16(data[0..hdr.total], pseudo_hdr.cksum16()) != 0) {
                 util.errorf(@src(), "checksum error", .{});
                 return error.UdpChecksumError;
             }
         }
-        return hdr;
+        return .{
+            .hdr = hdr,
+            .payload = data[hdr_len..hdr.total],
+        };
     }
 
     pub fn format(
@@ -121,7 +132,7 @@ const UdpHdr = struct {
     ) std.Io.Writer.Error!void {
         try writer.print("        src: {f}\n", .{self.src});
         try writer.print("        dst: {f}\n", .{self.dst});
-        try writer.print("        len: {d} (payload: {d})\n", .{ self.len, self.len - hdr_len });
+        try writer.print("      total: {d} (payload: {d})\n", .{ self.total, self.total - hdr_len });
         try writer.print("        sum: 0x{x:0>4}\n", .{self.sum});
     }
 };
@@ -134,11 +145,8 @@ pub fn init() !void {
 }
 
 fn input(ip_hdr: *const ip.IpHdr, data: []const u8, iface: *ip.IpIface) !void {
-    const hdr = UdpHdr.decode(data, ip_hdr) catch |err| {
-        util.errorf(@src(), "UdpHdr.decode() failure: {t}", .{err});
-        return err;
-    };
-    util.debugf(@src(), "{f} => {f}, len={d}, dev={s}", .{ hdr.src, hdr.dst, data.len, iface.dev().name() });
-    util.dumpf("{f}", .{hdr});
+    const d = try UdpHdr.decode(data, ip_hdr);
+    util.debugf(@src(), "{f} => {f}, len={d}, dev={s}", .{ d.hdr.src, d.hdr.dst, data.len, iface.dev().name() });
+    util.dumpf("{f}", .{d.hdr});
     util.debugdump(data);
 }

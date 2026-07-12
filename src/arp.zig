@@ -25,7 +25,7 @@ const ArpOp = enum(u16) {
 const ArpHdr = struct {
     const Self = @This();
 
-    const size = 8;
+    const hdr_len = 8;
 
     hrd: ArpHrd,
     pro: ArpPro,
@@ -33,14 +33,12 @@ const ArpHdr = struct {
     pln: u8,
     op: ArpOp,
 
-    pub fn decode(data: []const u8) !Self {
-        if (data.len < size) {
-            util.errorf(@src(), "too short, len={d}", .{data.len});
-            return error.ArpHdrTooShort;
-        }
-        const hrd = std.mem.readInt(u16, data[0..2], .big);
-        const pro = std.mem.readInt(u16, data[2..4], .big);
-        const op = std.mem.readInt(u16, data[6..8], .big);
+    pub fn decode(r: *std.Io.Reader) !Self {
+        const hrd = try r.takeInt(u16, .big);
+        const pro = try r.takeInt(u16, .big);
+        const hln = try r.takeByte();
+        const pln = try r.takeByte();
+        const op = try r.takeInt(u16, .big);
         const self = Self{
             .hrd = std.enums.fromInt(ArpHrd, hrd) orelse {
                 util.errorf(@src(), "unknown arp hrd: {d}", .{hrd});
@@ -50,8 +48,8 @@ const ArpHdr = struct {
                 util.errorf(@src(), "unknown arp pro: {d}", .{pro});
                 return error.ArpUnknownPro;
             },
-            .hln = data[4],
-            .pln = data[5],
+            .hln = hln,
+            .pln = pln,
             .op = std.enums.fromInt(ArpOp, op) orelse {
                 util.errorf(@src(), "unknown arp op: {d}", .{op});
                 return error.ArpUnknownOp;
@@ -68,17 +66,12 @@ const ArpHdr = struct {
         return self;
     }
 
-    pub fn encode(self: *const Self, buf: []u8) !void {
-        if (buf.len < size) {
-            util.errorf(@src(), "buffer too short: len={d} < size={d}", .{ buf.len, size });
-            return error.ArpBufferTooShort;
-        }
-
-        std.mem.writeInt(u16, buf[0..2], @intFromEnum(self.hrd), .big);
-        std.mem.writeInt(u16, buf[2..4], @intFromEnum(self.pro), .big);
-        buf[4] = self.hln;
-        buf[5] = self.pln;
-        std.mem.writeInt(u16, buf[6..8], @intFromEnum(self.op), .big);
+    pub fn encode(self: Self, w: *std.Io.Writer) !void {
+        try w.writeInt(u16, @intFromEnum(self.hrd), .big);
+        try w.writeInt(u16, @intFromEnum(self.pro), .big);
+        try w.writeByte(self.hln);
+        try w.writeByte(self.pln);
+        try w.writeInt(u16, @intFromEnum(self.op), .big);
     }
 
     pub fn format(
@@ -96,7 +89,7 @@ const ArpHdr = struct {
 const ArpEtherIp = struct {
     const Self = @This();
 
-    const size = ArpHdr.size + ether.EtherAddr.len * 2 + ip.IpAddr.len * 2;
+    const msg_len = ArpHdr.hdr_len + ether.EtherAddr.len * 2 + ip.IpAddr.len * 2;
 
     hdr: ArpHdr,
     sha: ether.EtherAddr,
@@ -121,29 +114,22 @@ const ArpEtherIp = struct {
     }
 
     pub fn decode(data: []const u8) !Self {
-        if (data.len < size) {
-            util.errorf(@src(), "too short, len={d}", .{data.len});
-            return error.ArpPacketTooShort;
-        }
+        var r: std.Io.Reader = .fixed(data);
         return Self{
-            .hdr = try ArpHdr.decode(data[0..ArpHdr.size]),
-            .sha = ether.EtherAddr.fromBytes(data[8..14].*),
-            .spa = ip.IpAddr.fromBytes(data[14..18].*),
-            .tha = ether.EtherAddr.fromBytes(data[18..24].*),
-            .tpa = ip.IpAddr.fromBytes(data[24..28].*),
+            .hdr = try ArpHdr.decode(&r),
+            .sha = .fromBytes(try r.takeArray(ether.EtherAddr.len)),
+            .spa = .fromBytes(try r.takeArray(ip.IpAddr.len)),
+            .tha = .fromBytes(try r.takeArray(ether.EtherAddr.len)),
+            .tpa = .fromBytes(try r.takeArray(ip.IpAddr.len)),
         };
     }
 
-    pub fn encode(self: *const Self, buf: []u8) !void {
-        if (buf.len < size) {
-            util.errorf(@src(), "buffer too short: len={d} < size={d}", .{ buf.len, size });
-            return error.ArpBufferTooShort;
-        }
-        try self.hdr.encode(buf[0..ArpHdr.size]);
-        buf[8..14].* = self.sha.toBytes();
-        buf[14..18].* = self.spa.toBytes();
-        buf[18..24].* = self.tha.toBytes();
-        buf[24..28].* = self.tpa.toBytes();
+    pub fn encode(self: Self, w: *std.Io.Writer) !void {
+        try self.hdr.encode(w);
+        try w.writeAll(&self.sha.toBytes());
+        try w.writeAll(&self.spa.toBytes());
+        try w.writeAll(&self.tha.toBytes());
+        try w.writeAll(&self.tpa.toBytes());
     }
 
     pub fn format(
@@ -302,10 +288,7 @@ pub fn init() !void {
 }
 
 fn input(data: []const u8, dev: *device.Device) !void {
-    const msg = ArpEtherIp.decode(data) catch |err| {
-        util.errorf(@src(), "ArpHdr.decode() failure: {t}", .{err});
-        return err;
-    };
+    const msg = try ArpEtherIp.decode(data);
     util.debugf(@src(), "dev={s}, len={d}", .{ dev.name(), data.len });
     util.dumpf("{f}", .{msg});
     util.debugdump(data);
@@ -326,35 +309,37 @@ fn input(data: []const u8, dev: *device.Device) !void {
 fn request(iface: *ip.IpIface, tpa: ip.IpAddr) !void {
     const msg = ArpEtherIp.init(
         .request,
-        ether.EtherAddr.fromBytes(iface.dev().addr[0..ether.EtherAddr.len].*),
+        ether.EtherAddr.fromBytes(iface.dev().addr[0..ether.EtherAddr.len]),
         iface.unicast,
         ether.EtherAddr.any,
         tpa,
     );
-    util.debugf(@src(), "dev={s}, len={d}", .{ iface.dev().name(), ArpEtherIp.size });
+    util.debugf(@src(), "dev={s}, len={d}", .{ iface.dev().name(), ArpEtherIp.msg_len });
     util.dumpf("{f}", .{msg});
 
-    var buf: [ArpEtherIp.size]u8 = undefined;
-    try msg.encode(&buf);
-    util.debugdump(&buf);
-    return iface.dev().output(.arp, &buf, &iface.dev().broadcast);
+    var buf: [ArpEtherIp.msg_len]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try msg.encode(&w);
+    util.debugdump(w.buffered());
+    return iface.dev().output(.arp, w.buffered(), &iface.dev().broadcast);
 }
 
 fn reply(iface: *ip.IpIface, tha: ether.EtherAddr, tpa: ip.IpAddr, dst: ether.EtherAddr) !void {
     const msg = ArpEtherIp.init(
         .reply,
-        ether.EtherAddr.fromBytes(iface.dev().addr[0..ether.EtherAddr.len].*),
+        ether.EtherAddr.fromBytes(iface.dev().addr[0..ether.EtherAddr.len]),
         iface.unicast,
         tha,
         tpa,
     );
-    util.debugf(@src(), "dev={s}, len={d}", .{ iface.dev().name(), ArpEtherIp.size });
+    util.debugf(@src(), "dev={s}, len={d}", .{ iface.dev().name(), ArpEtherIp.msg_len });
     util.dumpf("{f}", .{msg});
 
-    var buf: [ArpEtherIp.size]u8 = undefined;
-    try msg.encode(&buf);
-    util.debugdump(&buf);
-    return iface.dev().output(.arp, &buf, &dst.toBytes());
+    var buf: [ArpEtherIp.msg_len]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try msg.encode(&w);
+    util.debugdump(w.buffered());
+    return iface.dev().output(.arp, w.buffered(), &dst.toBytes());
 }
 
 pub fn resolve(iface: *ip.IpIface, pa: ip.IpAddr) !ether.EtherAddr {
