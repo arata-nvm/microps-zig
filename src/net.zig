@@ -5,6 +5,7 @@ const platform = @import("platform.zig");
 const device = @import("device.zig");
 const icmp = @import("icmp.zig");
 const ip = @import("ip.zig");
+const udp = @import("udp.zig");
 const util = @import("util.zig");
 
 const intr = platform.intr;
@@ -109,6 +110,11 @@ pub fn init(options: platform.InitOptions) !void {
         util.errorf(@src(), "platform.init() failure: {t}", .{err});
         return err;
     };
+
+    arp.init() catch |err| {
+        util.errorf(@src(), "arp.init() failure: {t}", .{err});
+        return err;
+    };
     ip.init() catch |err| {
         util.errorf(@src(), "ip.init() failure: {t}", .{err});
         return err;
@@ -117,8 +123,8 @@ pub fn init(options: platform.InitOptions) !void {
         util.errorf(@src(), "icmp.init() failure: {t}", .{err});
         return err;
     };
-    arp.init() catch |err| {
-        util.errorf(@src(), "arp.init() failure: {t}", .{err});
+    udp.init() catch |err| {
+        util.errorf(@src(), "udp.init() failure: {t}", .{err});
         return err;
     };
     util.infof(@src(), "success", .{});

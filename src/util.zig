@@ -156,7 +156,7 @@ pub fn cksum16(data: []const u8, init: u32) u16 {
         sum += std.mem.readInt(u16, data[i..][0..2], .big);
     }
     if (i < data.len) {
-        sum += data[i];
+        sum += @as(u16, data[i]) << 8;
     }
     while (sum >> 16 != 0) {
         sum = (sum & 0xffff) + (sum >> 16);

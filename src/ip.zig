@@ -228,7 +228,7 @@ pub const IpIface = struct {
     }
 };
 
-const IpProtocolType = enum(u8) {
+pub const IpProtocolType = enum(u8) {
     icmp = 1,
     tcp = 6,
     udp = 17,
