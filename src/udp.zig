@@ -42,6 +42,37 @@ pub const SocketAddr = struct {
     }
 };
 
+pub const PseudoHdr = struct {
+    src: ip.IpAddr,
+    dst: ip.IpAddr,
+    zero: u8 = 0,
+    proto: ip.IpProtocolType,
+    len: u16,
+
+    const Raw = extern struct {
+        src: [ip.IpAddr.len]u8,
+        dst: [ip.IpAddr.len]u8,
+        zero: u8,
+        proto: u8,
+        len: u16,
+    };
+
+    comptime {
+        std.debug.assert(@sizeOf(Raw) == 12);
+    }
+
+    pub fn cksum16(self: PseudoHdr) u16 {
+        const raw = Raw{
+            .src = self.src.toBytes(),
+            .dst = self.dst.toBytes(),
+            .zero = self.zero,
+            .proto = @intFromEnum(self.proto),
+            .len = std.mem.nativeToBig(u16, self.len),
+        };
+        return ~util.cksum16(std.mem.asBytes(&raw), 0);
+    }
+};
+
 const UdpHdr = struct {
     const Self = @This();
 
@@ -51,37 +82,6 @@ const UdpHdr = struct {
     dst: SocketAddr,
     total: u16,
     sum: u16 = 0,
-
-    const PseudoHdr = struct {
-        src: ip.IpAddr,
-        dst: ip.IpAddr,
-        zero: u8,
-        proto: ip.IpProtocolType,
-        len: u16,
-
-        const Raw = extern struct {
-            src: [ip.IpAddr.len]u8,
-            dst: [ip.IpAddr.len]u8,
-            zero: u8,
-            proto: u8,
-            len: u16,
-        };
-
-        comptime {
-            std.debug.assert(@sizeOf(Raw) == 12);
-        }
-
-        pub fn cksum16(self: PseudoHdr) u16 {
-            const raw = Raw{
-                .src = self.src.toBytes(),
-                .dst = self.dst.toBytes(),
-                .zero = self.zero,
-                .proto = @intFromEnum(self.proto),
-                .len = std.mem.nativeToBig(u16, self.len),
-            };
-            return ~util.cksum16(std.mem.asBytes(&raw), 0);
-        }
-    };
 
     pub const Decoded = struct {
         hdr: Self,
@@ -110,7 +110,6 @@ const UdpHdr = struct {
             const pseudo_hdr: PseudoHdr = .{
                 .src = ip_hdr.src,
                 .dst = ip_hdr.dst,
-                .zero = 0,
                 .proto = .udp,
                 .len = hdr.total,
             };

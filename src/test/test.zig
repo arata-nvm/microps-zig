@@ -141,53 +141,11 @@ fn cleanup() !void {
     };
 }
 
-fn receiver(desc: usize) void {
-    util.debugf(@src(), "running...", .{});
-
-    var buf: [128]u8 = undefined;
-    while (!terminate.load(.seq_cst)) {
-        const r = udp.cmd.recvfrom(desc, &buf) catch |err| switch (err) {
-            error.Interrupted => continue,
-            else => {
-                util.warnf(@src(), "udp.cmd.recvfrom() failure: {t}", .{err});
-                return;
-            },
-        };
-        util.infof(@src(), "{d} bytes data receive from {f}", .{ r.len, r.remote });
-        util.debugdump(buf[0..r.len]);
-    }
-    util.debugf(@src(), "terminate", .{});
-}
-
 fn appMain(io: std.Io) !void {
-    const desc = udp.cmd.open() catch |err| {
-        util.errorf(@src(), "udp.cmd.open() failure: {t}", .{err});
-        return err;
-    };
-    var thread = std.Thread.spawn(.{}, receiver, .{desc}) catch |err| {
-        util.errorf(@src(), "Thread.spawn() failure: {t}", .{err});
-        return err;
-    };
-    const remote = try udp.SocketAddr.fromString("192.0.2.1:10007");
     util.debugf(@src(), "press Ctrl+C to terminate", .{});
-
-    var buf: [128]u8 = undefined;
-    var stdin_reader = std.Io.File.stdin().readerStreaming(io, &buf);
-    const stdin = &stdin_reader.interface;
     while (!terminate.load(.seq_cst)) {
-        const line = stdin.takeDelimiterInclusive('\n') catch break;
-        util.infof(@src(), "{d} bytes data send to {f}", .{ line.len, remote });
-        util.debugdump(line);
-        _ = udp.cmd.sendto(desc, line, remote) catch |err| {
-            util.errorf(@src(), "udp.cmd.sendto() failure: {t}", .{err});
-            return err;
-        };
+        try io.sleep(.fromSeconds(1), .awake);
     }
-    udp.cmd.close(desc) catch |err| {
-        util.errorf(@src(), "udp.cmd.close() failure: {t}", .{err});
-        return err;
-    };
-    thread.join();
     util.debugf(@src(), "terminate", .{});
 }
 

@@ -5,6 +5,7 @@ const platform = @import("platform.zig");
 const device = @import("device.zig");
 const icmp = @import("icmp.zig");
 const ip = @import("ip.zig");
+const tcp = @import("tcp.zig");
 const udp = @import("udp.zig");
 const util = @import("util.zig");
 
@@ -125,6 +126,10 @@ pub fn init(options: platform.InitOptions) !void {
     };
     udp.init() catch |err| {
         util.errorf(@src(), "udp.init() failure: {t}", .{err});
+        return err;
+    };
+    tcp.init() catch |err| {
+        util.errorf(@src(), "tcp.init() failure: {t}", .{err});
         return err;
     };
     util.infof(@src(), "success", .{});
