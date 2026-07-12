@@ -111,6 +111,14 @@ fn setup(options: platform.InitOptions) !void {
             util.errorf(@src(), "ip.registerIface() failure: {t}", .{err});
             return err;
         };
+        const gateway = ip.IpAddr.fromString(DEFAULT_GATEWAY) catch |err| {
+            util.errorf(@src(), "IpAddr.fromString() failure: {t}", .{err});
+            return err;
+        };
+        ip.route.setDefaultGateway(iface, gateway) catch |err| {
+            util.errorf(@src(), "ip.route.setDefaultGateway() failure: {t}", .{err});
+            return err;
+        };
     }
 
     net.run() catch |err| {
@@ -128,8 +136,8 @@ fn cleanup() !void {
 }
 
 fn appMain(io: std.Io) !void {
-    const src = try ip.IpAddr.fromString("192.0.2.2");
-    const dst = try ip.IpAddr.fromString("192.0.2.1");
+    const src = ip.IpAddr.any;
+    const dst = try ip.IpAddr.fromString("8.8.8.8");
     const id: u16 = @intCast(std.c.getpid());
 
     util.debugf(@src(), "press Ctrl+C to terminate", .{});

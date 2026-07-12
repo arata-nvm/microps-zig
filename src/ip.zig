@@ -66,6 +66,18 @@ pub const IpAddr = struct {
         return (self.addr & netmask.addr) == (other.addr & netmask.addr);
     }
 
+    pub fn isInSubnet(self: Self, other: Self, netmask: Self) bool {
+        return (self.addr & netmask.addr) == other.addr;
+    }
+
+    pub fn isLessSpecificThan(self: Self, other: Self) bool {
+        return self.addr < other.addr;
+    }
+
+    pub fn masked(self: Self, netmask: Self) Self {
+        return IpAddr{ .addr = self.addr & netmask.addr };
+    }
+
     pub fn format(self: Self, writer: *std.Io.Writer) !void {
         try writer.print("{d}.{d}.{d}.{d}", .{
             (self.addr >> 24) & 0xff,
@@ -222,7 +234,11 @@ const IpProtocolType = enum(u8) {
     udp = 17,
 };
 
-const IpProtocolHandler = *const fn (hdr: *const IpHdr, data: []const u8, iface: *IpIface) anyerror!void;
+const IpProtocolHandler = *const fn (
+    hdr: *const IpHdr,
+    data: []const u8,
+    iface: *IpIface,
+) anyerror!void;
 
 const IpProtocol = struct { type: IpProtocolType, handler: IpProtocolHandler };
 
@@ -239,6 +255,13 @@ pub fn init() !void {
 pub fn registerIface(dev: *device.Device, iface: *IpIface) !void {
     const allocator = platform.allocator();
     try dev.addIface(&iface.iface);
+
+    const network = iface.unicast.masked(iface.netmask);
+    route.add(network, iface.netmask, IpAddr.any, iface) catch |err| {
+        util.errorf(@src(), "route.add() failure: {t}", .{err});
+        return err;
+    };
+
     try ifaces.append(allocator, iface);
 }
 
@@ -292,17 +315,18 @@ fn input(data: []const u8, dev: *device.Device) !void {
 
 pub fn output(protocol: IpProtocolType, data: []const u8, src: IpAddr, dst: IpAddr) !usize {
     util.debugf(@src(), "{f} => {f}, protocol={d}, len={d}", .{ src, dst, protocol, data.len });
-    if (src.eql(IpAddr.any)) {
-        util.errorf(@src(), "ip routing not implemented", .{});
+    if (src.eql(IpAddr.any) and dst.eql(IpAddr.broadcast)) {
+        util.errorf(@src(), "source address is required for broadcast addresses", .{});
         return error.IpRoutingNotImplemented;
     }
-    const iface = selectIface(src) orelse {
-        util.errorf(@src(), "iface not found: src={f}", .{src});
-        return error.IpIfaceNotFound;
+    const r = route.lookup(dst) orelse {
+        util.errorf(@src(), "no route to host, dst={f}", .{dst});
+        return error.IpRouteNotFound;
     };
-    if (!dst.isSameSubnet(iface.unicast, iface.netmask) and !dst.eql(IpAddr.broadcast)) {
-        util.errorf(@src(), "not reached, dst={f}", .{dst});
-        return error.IpNotReached;
+    const iface = r.iface;
+    if (!src.eql(IpAddr.any) and !src.eql(iface.unicast)) {
+        util.errorf(@src(), "unable to output with specified source address, src={f}", .{src});
+        return error.IpSourceAddressNotAvailable;
     }
     if (iface.dev().mtu < IpHdr.size_min + data.len) {
         util.errorf(@src(), "too long, dev={s}, mtu={d} < len={d}", .{ iface.dev().name(), iface.dev().mtu, IpHdr.size_min + data.len });
@@ -315,7 +339,8 @@ pub fn output(protocol: IpProtocolType, data: []const u8, src: IpAddr, dst: IpAd
         util.errorf(@src(), "buildPacket() failure: {t}", .{err});
         return err;
     };
-    outputDevice(iface, packet, dst) catch |err| {
+    const next = if (!r.nexthop.eql(IpAddr.any)) r.nexthop else dst;
+    outputDevice(iface, packet, next) catch |err| {
         util.errorf(@src(), "outputDevice() failure: {t}", .{err});
         return err;
     };
@@ -373,6 +398,71 @@ fn buildPacket(buf: []u8, protocol: IpProtocolType, data: []const u8, id: u16, o
     util.dumpf("{f}", .{hdr});
     return buf[0..total];
 }
+
+pub const route = struct {
+    const IpRoute = struct {
+        network: IpAddr,
+        netmask: IpAddr,
+        nexthop: IpAddr,
+        iface: *IpIface,
+    };
+
+    var routes: std.ArrayList(IpRoute) = .empty;
+
+    // NOTE: must not be called after run()
+    pub fn setDefaultGateway(iface: *IpIface, gateway: IpAddr) !void {
+        add(IpAddr.any, IpAddr.any, gateway, iface) catch |err| {
+            util.errorf(@src(), "routeSetDefaultGateway() failure: {t}", .{err});
+            return err;
+        };
+    }
+
+    pub fn getIface(dst: IpAddr) ?*IpIface {
+        const r = lookup(dst) orelse return null;
+        return r.iface;
+    }
+
+    // NOTE: must not be called after run()
+    fn add(network: IpAddr, netmask: IpAddr, nexthop: IpAddr, iface: *IpIface) !void {
+        if (!nexthop.eql(IpAddr.any)) {
+            util.infof(@src(), "{f}/{f} via {f} dev {s} src {f}", .{
+                network,
+                netmask,
+                nexthop,
+                iface.dev().name(),
+                iface.unicast,
+            });
+        } else {
+            util.infof(@src(), "{f}/{f} dev {s} src {f}", .{
+                network,
+                netmask,
+                iface.dev().name(),
+                iface.unicast,
+            });
+        }
+
+        const allocator = platform.allocator();
+        try routes.append(allocator, .{
+            .network = network,
+            .netmask = netmask,
+            .nexthop = nexthop,
+            .iface = iface,
+        });
+    }
+
+    fn lookup(dst: IpAddr) ?*IpRoute {
+        var candidate: ?*IpRoute = null;
+        for (routes.items) |*r| {
+            if (!dst.isInSubnet(r.network, r.netmask)) {
+                continue;
+            }
+            if (candidate == null or candidate.?.netmask.isLessSpecificThan(r.netmask)) {
+                candidate = r;
+            }
+        }
+        return candidate;
+    }
+};
 
 test "IpHdr round-trip" {
     const packet = [_]u8{
