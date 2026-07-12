@@ -132,15 +132,15 @@ pub fn init() !void {
     };
 }
 
-fn input(ip_hdr: *const ip.IpHdr, data: []const u8, iface: *ip.IpIface) !void {
-    const d = try IcmpHdr.decode(data);
-    util.debugf(@src(), "{f} => {f}, len={d}", .{ ip_hdr.src, ip_hdr.dst, data.len });
-    util.dumpf("{f}", .{d.hdr});
+fn input(ipd: *const ip.IpHdr.Decoded, data: []const u8, iface: *ip.IpIface) !void {
+    const icmpd = try IcmpHdr.decode(data);
+    util.debugf(@src(), "{f} => {f}, len={d}", .{ ipd.hdr.src, ipd.hdr.dst, data.len });
+    util.dumpf("{f}", .{icmpd.hdr});
     util.debugdump(data);
-    switch (d.hdr.msg) {
+    switch (icmpd.hdr.msg) {
         .echo => |msg| {
             // Responds with the address of the received interface.
-            _ = try output(.{ .echo_reply = msg }, d.payload, iface.unicast, ip_hdr.src);
+            _ = try output(.{ .echo_reply = msg }, icmpd.payload, iface.unicast, ipd.hdr.src);
         },
         else => {
             // ignore

@@ -117,13 +117,14 @@ pub const IpHdr = struct {
     src: IpAddr,
     dst: IpAddr,
 
-    fn hlen(self: Self) u16 {
+    pub fn hlen(self: Self) u16 {
         return @as(u16, self.hlen_4byte) << 2;
     }
 
     pub const Decoded = struct {
         hdr: Self,
         payload: []const u8,
+        raw: []const u8,
     };
 
     pub fn decode(packet: []const u8) !Decoded {
@@ -159,6 +160,7 @@ pub const IpHdr = struct {
         return .{
             .hdr = self,
             .payload = packet[self.hlen()..self.total],
+            .raw = packet,
         };
     }
 
@@ -254,7 +256,7 @@ pub const IpProtocolType = enum(u8) {
 };
 
 const IpProtocolHandler = *const fn (
-    hdr: *const IpHdr,
+    hdr: *const IpHdr.Decoded,
     data: []const u8,
     iface: *IpIface,
 ) anyerror!void;
@@ -322,7 +324,7 @@ fn input(data: []const u8, dev: *device.Device) !void {
     util.dumpf("{f}", .{hdr});
     for (protocols.items) |proto| {
         if (proto.type == hdr.protocol) {
-            try proto.handler(&hdr, d.payload, iface);
+            try proto.handler(&d, d.payload, iface);
             return;
         }
     }

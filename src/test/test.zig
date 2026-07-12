@@ -8,6 +8,7 @@ const icmp = microps.icmp;
 const ip = microps.ip;
 const net = microps.net;
 const platform = microps.platform;
+const udp = microps.udp;
 const util = microps.util;
 
 const ether_tap = platform.driver.ether_tap;
@@ -136,10 +137,23 @@ fn cleanup() !void {
 }
 
 fn appMain(io: std.Io) !void {
+    const desc = udp.cmd.open() catch |err| {
+        util.errorf(@src(), "udp.cmd.open() failure: {t}", .{err});
+        return err;
+    };
+    const local = try udp.SocketAddr.fromString("192.0.2.2:7");
+    udp.cmd.bind(desc, local) catch |err| {
+        util.errorf(@src(), "udp.cmd.bind() failure: {t}", .{err});
+        return err;
+    };
     util.debugf(@src(), "press Ctrl+C to terminate", .{});
     while (!terminate.load(.seq_cst)) {
         try io.sleep(.fromSeconds(1), .awake);
     }
+    udp.cmd.close(desc) catch |err| {
+        util.errorf(@src(), "udp.cmd.close() failure: {t}", .{err});
+        return err;
+    };
     util.debugf(@src(), "terminate", .{});
 }
 
