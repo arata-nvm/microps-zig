@@ -5,20 +5,17 @@ const ip = @import("ip.zig");
 const platform = @import("platform.zig");
 const util = @import("util.zig");
 
+const sched = platform.sched;
+
 const Port = enum(u16) {
     _,
+
+    pub const unspecified: Port = @enumFromInt(0);
 
     // Dynamic Source Ports
     //  - see https://tools.ietf.org/html/rfc6335
     pub const dynamic_min: Port = @enumFromInt(49152);
     pub const dynamic_max: Port = @enumFromInt(65535);
-
-    pub fn format(
-        self: @This(),
-        writer: *std.Io.Writer,
-    ) std.Io.Writer.Error!void {
-        try writer.print("{d}", .{@intFromEnum(self)});
-    }
 };
 
 pub const SocketAddr = struct {
@@ -41,7 +38,7 @@ pub const SocketAddr = struct {
     ) std.Io.Writer.Error!void {
         try writer.print("{f}", .{self.addr});
         try writer.writeAll(":");
-        try writer.print("{f}", .{self.port});
+        try writer.print("{d}", .{self.port});
     }
 };
 
@@ -53,7 +50,7 @@ const UdpHdr = struct {
     src: SocketAddr,
     dst: SocketAddr,
     total: u16,
-    sum: u16,
+    sum: u16 = 0,
 
     const PseudoHdr = struct {
         src: ip.IpAddr,
@@ -128,6 +125,26 @@ const UdpHdr = struct {
         };
     }
 
+    pub fn encode(self: Self, w: *std.Io.Writer, data: []const u8) !void {
+        const start = w.buffered().len;
+        try w.writeInt(u16, @intFromEnum(self.src.port), .big);
+        try w.writeInt(u16, @intFromEnum(self.dst.port), .big);
+        try w.writeInt(u16, self.total, .big);
+        try w.writeInt(u16, 0, .big);
+        try w.writeAll(data);
+
+        const msg_bytes = w.buffered()[start..];
+        const pseudo_hdr: PseudoHdr = .{
+            .src = self.src.addr,
+            .dst = self.dst.addr,
+            .zero = 0,
+            .proto = .udp,
+            .len = self.total,
+        };
+        const sum = util.cksum16(msg_bytes, pseudo_hdr.cksum16());
+        std.mem.writeInt(u16, msg_bytes[6..8], if (sum != 0) sum else 0xffff, .big);
+    }
+
     pub fn format(
         self: @This(),
         writer: *std.Io.Writer,
@@ -150,9 +167,11 @@ const PcbTable = struct {
     };
 
     const Pcb = struct {
+        desc: usize = 0,
         state: enum { free, open, closing } = .free,
-        local: SocketAddr = .{ .addr = ip.IpAddr.any, .port = @enumFromInt(0) },
+        local: SocketAddr = .{ .addr = ip.IpAddr.any, .port = .unspecified },
         queue: util.Queue(QueueEntry) = .{},
+        task: sched.Task = .{},
     };
 
     lock: platform.Lock = .{},
@@ -181,12 +200,38 @@ const PcbTable = struct {
         return null;
     }
 
+    fn release(_: *Self, pcb: *Pcb) !void {
+        const desc = pcb.desc;
+
+        pcb.state = .closing;
+        pcb.task.destroy() catch |err| switch (err) {
+            error.Busy => {
+                util.debugf(@src(), "pending, desc={d}", .{desc});
+                pcb.task.wakeup();
+                return;
+            },
+        };
+
+        pcb.desc = 0;
+        pcb.state = .free;
+        pcb.local = .{ .addr = ip.IpAddr.any, .port = .unspecified };
+
+        const allocator = platform.allocator();
+        while (pcb.queue.pop()) |entry| {
+            util.debugf(@src(), "free queue entry", .{});
+            allocator.free(entry.data);
+        }
+
+        util.debugf(@src(), "success, desc={d}", .{desc});
+    }
+
     pub fn open(self: *Self) !usize {
         self.lock.acquire();
         defer self.lock.release();
 
         for (&self.pcbs, 0..) |*pcb, desc| {
             if (pcb.state == .free) {
+                pcb.desc = desc;
                 pcb.state = .open;
                 return desc;
             }
@@ -199,14 +244,7 @@ const PcbTable = struct {
         defer self.lock.release();
 
         const pcb = self.get(desc) orelse return error.PcbNotFound;
-        pcb.state = .free;
-        pcb.local = .{ .addr = ip.IpAddr.any, .port = @enumFromInt(0) };
-
-        const allocator = platform.allocator();
-        while (pcb.queue.pop()) |entry| {
-            util.debugf(@src(), "free queue entry", .{});
-            allocator.free(entry.data);
-        }
+        try self.release(pcb);
     }
 
     pub fn bind(self: *Self, desc: usize, local: SocketAddr) !void {
@@ -234,7 +272,79 @@ const PcbTable = struct {
             .data = try allocator.dupe(u8, data),
         });
         util.debugf(@src(), "success, desc={d}, num={d}", .{ desc, pcb.queue.num });
+        pcb.task.wakeup();
     }
+
+    pub fn recvfrom(self: *Self, desc: usize, buf: []u8) !RecvfromResult {
+        self.lock.acquire();
+        defer self.lock.release();
+
+        const pcb = self.get(desc) orelse return error.PcbNotFound;
+        while (true) {
+            if (pcb.queue.pop()) |entry| {
+                const allocator = platform.allocator();
+                defer allocator.free(entry.data);
+
+                util.debugf(@src(), "success, desc={d}, num={d}", .{ desc, pcb.queue.num });
+                const len = @min(buf.len, entry.data.len);
+                @memcpy(buf[0..len], entry.data[0..len]);
+                return .{ .remote = entry.remote, .len = len };
+            }
+
+            util.debugf(@src(), "empty, desc={d}, sleep task...", .{desc});
+            pcb.task.sleep(&self.lock, null) catch |err| {
+                util.debugf(@src(), "interrupted: {t}", .{err});
+                return error.Interrupted;
+            };
+
+            util.debugf(@src(), "task wakeup", .{});
+
+            if (pcb.state == .closing) {
+                util.debugf(@src(), "closed", .{});
+                try self.release(pcb);
+                return error.PcbClosed;
+            }
+        }
+    }
+
+    pub fn sendto(self: *Self, desc: usize, data: []const u8, remote: SocketAddr) !usize {
+        self.lock.acquire();
+        defer self.lock.release();
+
+        const pcb = self.get(desc) orelse return error.PcbNotFound;
+
+        var local = pcb.local;
+        if (local.port == Port.unspecified) {
+            const min: u32 = @intFromEnum(Port.dynamic_min);
+            const max: u32 = @intFromEnum(Port.dynamic_max);
+            for (min..max + 1) |p| {
+                const port: Port = @enumFromInt(p);
+                local.port = port;
+                if (self.select(local) == null) {
+                    pcb.local.port = port; // save dynamic source port
+                    util.debugf(@src(), "dynamic assign local port, port={d}", .{port});
+                    break;
+                }
+            } else {
+                util.debugf(@src(), "failed to dynamic assign local port, addr={f}", .{local.addr});
+                return error.PcbNoAvailablePort;
+            }
+        }
+        if (local.addr.eql(ip.IpAddr.any)) {
+            const iface = ip.route.getIface(remote.addr) orelse {
+                util.errorf(@src(), "iface not found that can reach foreign address, addr={f}", .{remote.addr});
+                return error.PcbNoRoute;
+            };
+            local.addr = iface.unicast;
+            util.debugf(@src(), "select local address, addr={f}", .{local.addr});
+        }
+        return try output(local, remote, data);
+    }
+};
+
+pub const RecvfromResult = struct {
+    remote: SocketAddr,
+    len: usize,
 };
 
 var pcb_table: PcbTable = .{};
@@ -252,7 +362,7 @@ fn input(ipd: *const ip.IpHdr.Decoded, data: []const u8, iface: *ip.IpIface) !vo
     util.dumpf("{f}", .{udpd.hdr});
     util.debugdump(data);
 
-    pcb_table.deliver(udpd.hdr.dst, udpd.hdr.src, data) catch |err| {
+    pcb_table.deliver(udpd.hdr.dst, udpd.hdr.src, udpd.payload) catch |err| {
         util.errorf(@src(), "pcb_table.deliver() failure: {t}", .{err});
         _ = try icmp.output(
             .{ .dest_unreachable = .{ .code = .port_unreachable } },
@@ -262,6 +372,28 @@ fn input(ipd: *const ip.IpHdr.Decoded, data: []const u8, iface: *ip.IpIface) !vo
         );
         return err;
     };
+}
+
+fn output(src: SocketAddr, dst: SocketAddr, data: []const u8) !usize {
+    var buf: [ip.payload_size_max]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    const hdr = UdpHdr{
+        .src = src,
+        .dst = dst,
+        .total = @intCast(UdpHdr.hdr_len + data.len),
+    };
+    hdr.encode(&w, data) catch |err| {
+        util.errorf(@src(), "UdpHdr.encode() failure: {t}", .{err});
+        return err;
+    };
+    util.debugf(@src(), "{f} => {f}, len={d}", .{ src, dst, hdr.total });
+    util.dumpf("{f}", .{hdr});
+    util.debugdump(w.buffered());
+    _ = ip.output(.udp, w.buffered(), src.addr, dst.addr) catch |err| {
+        util.errorf(@src(), "ip.output() failure: {t}", .{err});
+        return err;
+    };
+    return data.len;
 }
 
 pub const cmd = struct {
@@ -288,5 +420,19 @@ pub const cmd = struct {
             return err;
         };
         util.debugf(@src(), "desc={d}, {f}", .{ desc, local });
+    }
+
+    pub fn recvfrom(desc: usize, buf: []u8) !RecvfromResult {
+        return pcb_table.recvfrom(desc, buf) catch |err| {
+            util.errorf(@src(), "pcb_table.recvfrom() failure: {t}", .{err});
+            return err;
+        };
+    }
+
+    pub fn sendto(desc: usize, data: []const u8, remote: SocketAddr) !usize {
+        return pcb_table.sendto(desc, data, remote) catch |err| {
+            util.errorf(@src(), "pcb_table.sendto() failure: {t}", .{err});
+            return err;
+        };
     }
 };

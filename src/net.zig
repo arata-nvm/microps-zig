@@ -94,7 +94,7 @@ pub fn input(typ: ProtocolType, data: []const u8, dev: *device.Device) !void {
     // allow unsupported protocols
 }
 
-pub fn sortirq_handler(_: u32, _: *void) !void {
+pub fn sortirqHandler(_: u32) !void {
     const allocator = platform.allocator();
     for (protocols.items) |*proto| {
         while (proto.queuePop()) |entry| {

@@ -31,6 +31,16 @@ var thread: ?std.Thread = null;
 var barrier: std.c.sem_t = undefined;
 var sigmask: std.c.sigset_t = undefined;
 
+pub fn registerNoarg(irq: u32, isr: fn (u32) anyerror!void, flags: IrqFlags) !void {
+    const Shim = struct {
+        fn call(i: u32, arg: ?*anyopaque) !void {
+            _ = arg;
+            try isr(i);
+        }
+    };
+    return register(irq, Shim.call, flags, null);
+}
+
 pub fn registerTyped(comptime Ctx: type, irq: u32, comptime isr: fn (u32, *Ctx) anyerror!void, flags: IrqFlags, ctx: *Ctx) !void {
     const Shim = struct {
         fn call(i: u32, arg: ?*anyopaque) !void {

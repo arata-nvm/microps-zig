@@ -32,18 +32,21 @@ pub fn init(options: InitOptions) !void {
     started = now();
 
     try intr.init();
-    try intr.registerTyped(void, intr.irq_soft, net.sortirq_handler, .{}, undefined);
+    try intr.registerNoarg(intr.irq_soft, net.sortirqHandler, .{});
     try timer.init();
+    try sched.init();
 }
 
 pub fn run() !void {
     try intr.run();
     try timer.run();
+    try sched.run();
 }
 
 pub fn shutdown() !void {
     try intr.shutdown();
     try timer.shutdown();
+    try sched.shutdown();
 }
 
 pub const Lock = struct {
