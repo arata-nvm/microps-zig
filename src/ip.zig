@@ -302,7 +302,7 @@ fn input(data: []const u8, dev: *device.Device) !void {
     util.dumpf("{f}", .{hdr});
     for (protocols.items) |proto| {
         if (proto.type == hdr.protocol) {
-            try proto.handler(&hdr, data[hdr.hlen()..], iface);
+            try proto.handler(&hdr, data[hdr.hlen()..hdr.total], iface);
             return;
         }
     }
