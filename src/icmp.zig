@@ -139,6 +139,7 @@ fn input(ip_hdr: *const ip.IpHdr, data: []const u8, iface: *ip.IpIface) !void {
     const icmp_hdr = try IcmpHdr.decode(data);
     util.debugf(@src(), "{f} => {f}, len={d}", .{ ip_hdr.src, ip_hdr.dst, data.len });
     util.dumpf("{f}", .{icmp_hdr});
+    util.debugdump(data);
     switch (icmp_hdr.msg) {
         .echo => |msg| {
             // Responds with the address of the received interface.
