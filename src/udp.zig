@@ -7,7 +7,7 @@ const util = @import("util.zig");
 
 const sched = platform.sched;
 
-const Port = enum(u16) {
+pub const Port = enum(u16) {
     _,
 
     pub const unspecified: Port = @enumFromInt(0);
@@ -21,8 +21,8 @@ const Port = enum(u16) {
 pub const SocketAddr = struct {
     const Self = @This();
 
-    addr: ip.IpAddr,
-    port: Port,
+    addr: ip.IpAddr = ip.IpAddr.any,
+    port: Port = Port.unspecified,
 
     pub fn fromString(s: []const u8) !Self {
         const i = std.mem.indexOfScalar(u8, s, ':') orelse return error.InvalidAddress;
@@ -177,7 +177,7 @@ const PcbTable = struct {
     pcbs: [size]Pcb = @splat(.{}),
 
     fn get(self: *Self, desc: usize) ?*Pcb {
-        if (size < desc) {
+        if (size <= desc) {
             return null;
         }
         const pcb = &self.pcbs[desc];
@@ -232,6 +232,7 @@ const PcbTable = struct {
             if (pcb.state == .free) {
                 pcb.desc = desc;
                 pcb.state = .open;
+                pcb.task = .{};
                 return desc;
             }
         }

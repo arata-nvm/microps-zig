@@ -5,26 +5,28 @@ const platform = @import("platform.zig");
 const udp = @import("udp.zig");
 const util = @import("util.zig");
 
-const TcpFlag = packed struct(u8) {
-    fin: u1,
-    syn: u1,
-    rst: u1,
-    psh: u1,
-    ack: u1,
-    urg: u1,
-    zero: u2,
+const sched = platform.sched;
+
+const TcpFlags = packed struct(u8) {
+    fin: bool = false,
+    syn: bool = false,
+    rst: bool = false,
+    psh: bool = false,
+    ack: bool = false,
+    urg: bool = false,
+    zero: u2 = 0,
 
     pub fn format(
         self: @This(),
         writer: *std.Io.Writer,
     ) !void {
         try writer.print("{c}{c}{c}{c}{c}{c}", .{
-            @as(u8, if (self.urg != 0) 'U' else '-'),
-            @as(u8, if (self.ack != 0) 'A' else '-'),
-            @as(u8, if (self.psh != 0) 'P' else '-'),
-            @as(u8, if (self.rst != 0) 'R' else '-'),
-            @as(u8, if (self.syn != 0) 'S' else '-'),
-            @as(u8, if (self.fin != 0) 'F' else '-'),
+            @as(u8, if (self.urg) 'U' else '-'),
+            @as(u8, if (self.ack) 'A' else '-'),
+            @as(u8, if (self.psh) 'P' else '-'),
+            @as(u8, if (self.rst) 'R' else '-'),
+            @as(u8, if (self.syn) 'S' else '-'),
+            @as(u8, if (self.fin) 'F' else '-'),
         });
     }
 };
@@ -60,10 +62,10 @@ const TcpHdr = struct {
     dst: udp.SocketAddr,
     seq: u32,
     ack: u32,
-    off: u4,
-    flg: TcpFlag,
+    off_4byte: u4,
+    flg: TcpFlags,
     wnd: u16,
-    sum: u16,
+    sum: u16 = 0,
     up: u16,
     opts: std.ArrayList(TcpOption) = .empty,
 
@@ -85,7 +87,7 @@ const TcpHdr = struct {
             },
             .seq = try r.takeInt(u32, .big),
             .ack = try r.takeInt(u32, .big),
-            .off = @truncate(try r.takeInt(u8, .big) >> 4),
+            .off_4byte = @truncate(try r.takeInt(u8, .big) >> 4),
             .flg = @bitCast(try r.takeInt(u8, .big)),
             .wnd = try r.takeInt(u16, .big),
             .sum = try r.takeInt(u16, .big),
@@ -167,8 +169,33 @@ const TcpHdr = struct {
         };
     }
 
+    pub fn encode(self: Self, w: *std.Io.Writer, data: []const u8) !void {
+        const start = w.buffered().len;
+        try w.writeInt(u16, @intFromEnum(self.src.port), .big);
+        try w.writeInt(u16, @intFromEnum(self.dst.port), .big);
+        try w.writeInt(u32, self.seq, .big);
+        try w.writeInt(u32, self.ack, .big);
+        try w.writeInt(u8, @as(u8, self.off_4byte) << 4, .big);
+        try w.writeInt(u8, @as(u8, @bitCast(self.flg)), .big);
+        try w.writeInt(u16, self.wnd, .big);
+        try w.writeInt(u16, 0, .big);
+        try w.writeInt(u16, self.up, .big);
+        try w.writeAll(data);
+
+        const msg_bytes = w.buffered()[start..];
+        const pseudo_hdr: udp.PseudoHdr = .{
+            .src = self.src.addr,
+            .dst = self.dst.addr,
+            .zero = 0,
+            .proto = .tcp,
+            .len = @intCast(self.hlen() + data.len),
+        };
+        const sum = util.cksum16(msg_bytes, pseudo_hdr.cksum16());
+        std.mem.writeInt(u16, msg_bytes[16..18], sum, .big);
+    }
+
     pub fn hlen(self: Self) u8 {
-        return @as(u8, self.off) << 2;
+        return @as(u8, self.off_4byte) << 2;
     }
 
     pub fn format(
@@ -179,7 +206,7 @@ const TcpHdr = struct {
         try writer.print("        dst: {f}\n", .{self.dst});
         try writer.print("        seq: {d}\n", .{self.seq});
         try writer.print("        ack: {d}\n", .{self.ack});
-        try writer.print("        off: 0x{x:0>2} ({d}) (options: {d})\n", .{ self.off, self.hlen(), self.hlen() - hdr_len_min });
+        try writer.print("        off: 0x{x:0>2} ({d}) (options: {d})\n", .{ self.off_4byte, self.hlen(), self.hlen() - hdr_len_min });
         try writer.print("        flg: 0x{x:0>2} ({f})\n", .{ @as(u8, @bitCast(self.flg)), self.flg });
         try writer.print("        wnd: {d}\n", .{self.wnd});
         try writer.print("        sum: 0x{x:0>4}\n", .{self.sum});
@@ -198,6 +225,156 @@ const TcpHdr = struct {
     }
 };
 
+const PcbTable = struct {
+    const Self = @This();
+
+    const size = 16;
+
+    const State = enum {
+        none,
+        closed,
+        listen,
+        syn_sent,
+        syn_received,
+        established,
+        fin_wait_1,
+        fin_wait_2,
+        close_wait,
+        closing,
+        last_ack,
+        time_wait,
+    };
+
+    const SndVars = struct {
+        // 次に送信するシーケンス番号
+        nxt: u32 = 0,
+        // 未確認の最小のシーケンス番号
+        una: u32 = 0,
+        // 受信側のウィンドウサイズ
+        wnd: u16 = 0,
+        // 緊急ポインタ
+        up: u16 = 0,
+        // 最後に受信したウィンドウ更新のシーケンス番号
+        wl1: u32 = 0,
+        // 最後に受信したウィンドウ更新の確認応答番号
+        wl2: u32 = 0,
+    };
+
+    const RcvVars = struct {
+        // 次に期待するシーケンス番号
+        nxt: u32 = 0,
+        // 受信側のウィンドウサイズ
+        wnd: u16 = 0,
+        // 緊急ポインタ
+        up: u16 = 0,
+    };
+
+    const Pcb = struct {
+        state: State = .none,
+        local: udp.SocketAddr = .{},
+        remote: udp.SocketAddr = .{},
+        snd: SndVars = .{},
+        // 初期送信シーケンス番号
+        iss: u32 = 0,
+        rcv: RcvVars = .{},
+        // 初期受信シーケンス番号
+        irs: u32 = 0,
+        mss: u16 = 0,
+        buf: [65535]u8 = undefined,
+        task: sched.Task = .{},
+    };
+
+    const SegInfo = struct {
+        seq: u32,
+        ack: u32,
+        len: u16,
+        wnd: u16,
+        up: u16,
+    };
+
+    lock: platform.Lock = .{},
+    pcbs: [size]Pcb = @splat(.{}),
+
+    fn get(self: *Self, desc: usize) ?*Pcb {
+        if (size <= desc) {
+            return null;
+        }
+        const pcb = &self.pcbs[desc];
+        return if (pcb.state != .none) pcb else null;
+    }
+
+    fn alloc(self: *Self) !usize {
+        self.lock.acquire();
+        defer self.lock.release();
+
+        for (&self.pcbs, 0..) |*pcb, desc| {
+            if (pcb.state == .none) {
+                pcb.state = .closed;
+                pcb.task = .{};
+                return desc;
+            }
+        }
+        return error.PcbTableFull;
+    }
+
+    fn release(_: *Self, pcb: *Pcb) !void {
+        pcb.task.destroy() catch |err| switch (err) {
+            error.Busy => {
+                util.debugf(@src(), "pending", .{});
+                pcb.task.wakeup();
+                return;
+            },
+        };
+        pcb.* = .{};
+        util.debugf(@src(), "success", .{});
+    }
+
+    fn select(self: *Self, local: udp.SocketAddr, remote: udp.SocketAddr) ?*Pcb {
+        var candidate: ?*Pcb = null;
+        for (&self.pcbs) |*pcb| {
+            if (pcb.local.port != local.port) {
+                continue;
+            }
+            if (!(pcb.local.addr.eql(local.addr) or pcb.local.addr.eql(ip.IpAddr.any)) and local.addr.eql(ip.IpAddr.any)) {
+                continue;
+            }
+
+            const remote_matched = pcb.remote.addr.eql(remote.addr) and pcb.remote.port == remote.port;
+            const pcb_remote_unspecified = pcb.remote.addr.eql(ip.IpAddr.any) and pcb.remote.port == udp.Port.unspecified;
+            const key_remote_unspecified = remote.addr.eql(ip.IpAddr.any) and remote.port == udp.Port.unspecified;
+            if (!remote_matched and !pcb_remote_unspecified and !key_remote_unspecified) {
+                continue;
+            }
+
+            if (pcb.state != .listen) {
+                return pcb;
+            }
+            candidate = pcb;
+        }
+        return candidate;
+    }
+
+    // rfc793 - section 3.9 [Event Processing > SEGMENT ARRIVES]
+    fn segment_arrives(self: *Self, seg: SegInfo, flags: TcpFlags, _: []const u8, local: udp.SocketAddr, remote: udp.SocketAddr) !void {
+        const pcb = self.select(local, remote);
+        if (pcb == null or pcb.?.state == .closed) {
+            util.debugf(@src(), "PCB is {s}", .{if (pcb != null) "closed" else "not found"});
+            if (flags.rst) {
+                return;
+            }
+            if (!flags.ack) {
+                _ = try outputSegment(0, seg.seq + seg.len, .{ .rst = true, .ack = true }, 0, &[_]u8{}, local, remote);
+            } else {
+                _ = try outputSegment(seg.ack, 0, .{ .rst = true }, 0, &[_]u8{}, local, remote);
+            }
+            return;
+        }
+        // TODO
+    }
+};
+
+var pcb_table: PcbTable = .{};
+
 pub fn init() !void {
     ip.registerProtocol(.tcp, input) catch |err| {
         util.errorf(@src(), "ip.registerProtocol() failure: {t}", .{err});
@@ -205,7 +382,7 @@ pub fn init() !void {
     };
 }
 
-pub fn input(ipd: *const ip.IpHdr.Decoded, data: []const u8, iface: *ip.IpIface) !void {
+fn input(ipd: *const ip.IpHdr.Decoded, data: []const u8, iface: *ip.IpIface) !void {
     const tcpd = try TcpHdr.decode(data, &ipd.hdr);
 
     const src_is_broadcast = tcpd.hdr.src.addr.eql(ip.IpAddr.broadcast) or tcpd.hdr.src.addr.eql(iface.broadcast);
@@ -218,4 +395,42 @@ pub fn input(ipd: *const ip.IpHdr.Decoded, data: []const u8, iface: *ip.IpIface)
     util.debugf(@src(), "{f} => {f}, len={d}, dev={s}", .{ tcpd.hdr.src, tcpd.hdr.dst, data.len, iface.dev().name() });
     util.dumpf("{f}", .{tcpd.hdr});
     util.debugdump(data);
+
+    var seg = PcbTable.SegInfo{
+        .seq = tcpd.hdr.seq,
+        .ack = tcpd.hdr.ack,
+        .len = @intCast(data.len - tcpd.hdr.hlen()),
+        .wnd = tcpd.hdr.wnd,
+        .up = tcpd.hdr.up,
+    };
+    if (tcpd.hdr.flg.syn) seg.len += 1;
+    if (tcpd.hdr.flg.fin) seg.len += 1;
+    try pcb_table.segment_arrives(seg, tcpd.hdr.flg, tcpd.payload, tcpd.hdr.dst, tcpd.hdr.src);
+}
+
+fn outputSegment(seq: u32, ack: u32, flg: TcpFlags, wnd: u16, data: []const u8, local: udp.SocketAddr, remote: udp.SocketAddr) !usize {
+    var buf: [ip.payload_size_max]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    const hdr = TcpHdr{
+        .src = local,
+        .dst = remote,
+        .seq = seq,
+        .ack = ack,
+        .off_4byte = TcpHdr.hdr_len_min >> 2,
+        .flg = flg,
+        .wnd = wnd,
+        .up = 0,
+    };
+    hdr.encode(&w, data) catch |err| {
+        util.errorf(@src(), "TcpHdr.encode() failure: {t}", .{err});
+        return err;
+    };
+    util.debugf(@src(), "{f} => {f}, len={d}", .{ local, remote, w.end });
+    util.dumpf("{f}", .{hdr});
+    util.debugdump(w.buffered());
+    _ = ip.output(.tcp, w.buffered(), local.addr, remote.addr) catch |err| {
+        util.errorf(@src(), "ip.output() failure: {t}", .{err});
+        return err;
+    };
+    return data.len;
 }
