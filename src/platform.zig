@@ -10,6 +10,7 @@ pub const Lock = impl.Lock;
 pub const now = impl.now;
 pub const uptime = impl.uptime;
 pub const random16 = impl.random16;
+pub const random32 = impl.random32;
 pub const log = impl.log;
 pub const timer = impl.timer;
 pub const sched = impl.sched;

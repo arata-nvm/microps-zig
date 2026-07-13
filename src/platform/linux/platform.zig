@@ -73,6 +73,13 @@ pub fn random16() u16 {
     return @bitCast(b);
 }
 
+pub fn random32() u32 {
+    const i = io orelse return 0;
+    var b: [4]u8 = undefined;
+    i.random(&b);
+    return @bitCast(b);
+}
+
 pub fn log(bytes: []const u8) void {
     var buffer: [64]u8 = undefined;
     const stderr = std.debug.lockStderr(&buffer);

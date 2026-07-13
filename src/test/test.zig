@@ -8,6 +8,7 @@ const icmp = microps.icmp;
 const ip = microps.ip;
 const net = microps.net;
 const platform = microps.platform;
+const tcp = microps.tcp;
 const udp = microps.udp;
 const util = microps.util;
 
@@ -142,10 +143,14 @@ fn cleanup() !void {
 }
 
 fn appMain(io: std.Io) !void {
+    const local = try udp.SocketAddr.fromString("0.0.0.0:7");
+    const remote = try udp.SocketAddr.fromString("0.0.0.0:0");
+    const desc = try tcp.cmd.open(local, remote, .passive);
     util.debugf(@src(), "press Ctrl+C to terminate", .{});
     while (!terminate.load(.seq_cst)) {
         try io.sleep(.fromSeconds(1), .awake);
     }
+    try tcp.cmd.close(desc);
     util.debugf(@src(), "terminate", .{});
 }
 
