@@ -225,83 +225,180 @@ const TcpHdr = struct {
     }
 };
 
+pub const Mode = enum {
+    passive,
+    active,
+};
+
+const State = enum {
+    none,
+    closed,
+    listen,
+    syn_sent,
+    syn_received,
+    established,
+    fin_wait_1,
+    fin_wait_2,
+    close_wait,
+    closing,
+    last_ack,
+    time_wait,
+};
+
+const SndVars = struct {
+    // 次に送信するシーケンス番号
+    nxt: u32 = 0,
+    // 未確認の最小のシーケンス番号
+    una: u32 = 0,
+    // 受信側のウィンドウサイズ
+    wnd: u16 = 0,
+    // 緊急ポインタ
+    up: u16 = 0,
+    // 最後に受信したウィンドウ更新のシーケンス番号
+    wl1: u32 = 0,
+    // 最後に受信したウィンドウ更新の確認応答番号
+    wl2: u32 = 0,
+};
+
+const RcvVars = struct {
+    // 次に期待するシーケンス番号
+    nxt: u32 = 0,
+    // 受信側のウィンドウサイズ
+    wnd: u16 = 0,
+    // 緊急ポインタ
+    up: u16 = 0,
+};
+
+const SegInfo = struct {
+    const Self = @This();
+
+    seq: u32,
+    ack: u32,
+    len: u16,
+    wnd: u16,
+    up: u16,
+    flg: TcpFlags,
+
+    pub fn init(hdr: TcpHdr, payload_len: usize) Self {
+        var len: u16 = @intCast(payload_len - hdr.hlen());
+        if (hdr.flg.syn) len += 1;
+        if (hdr.flg.fin) len += 1;
+        return Self{ .seq = hdr.seq, .ack = hdr.ack, .len = len, .wnd = hdr.wnd, .up = hdr.up, .flg = hdr.flg };
+    }
+};
+
+const Pcb = struct {
+    state: State = .none,
+    local: udp.SocketAddr = .{},
+    remote: udp.SocketAddr = .{},
+    snd: SndVars = .{},
+    // 初期送信シーケンス番号
+    iss: u32 = 0,
+    rcv: RcvVars = .{},
+    // 初期受信シーケンス番号
+    irs: u32 = 0,
+    mss: u16 = 0,
+    buf: [65535]u8 = undefined,
+    task: sched.Task = .{},
+
+    pub fn changeState(self: *Pcb, new_state: State) void {
+        util.debugf(@src(), "{t} => {t}", .{ self.state, new_state });
+        self.state = new_state;
+    }
+
+    pub fn release(self: *Pcb) void {
+        self.task.destroy() catch |err| switch (err) {
+            error.Busy => {
+                util.debugf(@src(), "pending", .{});
+                self.task.wakeup();
+                return;
+            },
+        };
+        self.* = .{};
+        util.debugf(@src(), "success", .{});
+    }
+
+    pub fn output(self: *Pcb, flg: TcpFlags, data: []const u8) !usize {
+        const seq = if (flg.syn) self.iss else self.snd.nxt;
+        if (flg.syn or flg.fin or data.len > 0) {
+            // TODO: add retransmission queue
+        }
+        return outputSegment(seq, self.rcv.nxt, flg, self.rcv.wnd, data, self.local, self.remote);
+    }
+
+    pub fn arrivesListen(self: *Pcb, seg: SegInfo, local: udp.SocketAddr, remote: udp.SocketAddr) !void {
+        // 1st check for an RST
+        if (seg.flg.rst) {
+            return;
+        }
+
+        // 2nd check for an ACK
+        if (seg.flg.ack) {
+            try replyRst(seg, local, remote);
+            return;
+        }
+
+        // 3rd check for a SYN
+        if (seg.flg.syn) {
+            // ignore: security/compartment check
+            self.local = local;
+            self.remote = remote;
+            self.rcv.wnd = self.buf.len;
+            self.rcv.nxt = seg.seq + 1;
+            self.irs = seg.seq;
+            self.iss = platform.random32();
+            _ = try self.output(.{ .syn = true, .ack = true }, &[_]u8{});
+            self.snd.nxt = self.iss + 1;
+            self.snd.una = self.iss;
+            self.changeState(.syn_received);
+            // ignore: Note that any other incoming control or data (combined with SYN)
+            // will be processed in the SYN-RECEIVED state, but processing of SYN and ACK
+            // should not be repeated.
+            return;
+        }
+
+        // 4th other text or control
+        // drop segment
+    }
+
+    pub fn arrivesSynSent(_: *Pcb) !void {
+        // 1st check the ACK bit
+        // 2nd check the RST bit
+        // 3rd check security and precedence (ignore)
+        // 4th check the SYN bit
+        // 5th, if neither of the SYN or RST bits is set then drop the segment and return
+        // drop segment
+    }
+
+    pub fn arrivesOtherwise(self: *Pcb, seg: SegInfo, local: udp.SocketAddr, remote: udp.SocketAddr) !void {
+        // 1st check sequence number
+        // 2nd check the RST bit
+        // 3rd check security and precedence (ignore)
+        // 4th check the SYN bit
+        // 5th check the ACK field
+        switch (self.state) {
+            .syn_received => {
+                if (self.snd.una <= seg.ack and seg.ack <= self.snd.nxt) {
+                    self.changeState(.established);
+                    self.task.wakeup();
+                } else {
+                    try replyRst(seg, local, remote);
+                    return;
+                }
+            },
+            else => {},
+        }
+
+        // 6th check the URG bit (ignore)
+        // 7th process the segment text
+        // 8th check the FIN bit
+    }
+};
+
 const PcbTable = struct {
     const Self = @This();
 
     const size = 16;
-
-    const Mode = enum {
-        passive,
-        active,
-    };
-
-    const State = enum {
-        none,
-        closed,
-        listen,
-        syn_sent,
-        syn_received,
-        established,
-        fin_wait_1,
-        fin_wait_2,
-        close_wait,
-        closing,
-        last_ack,
-        time_wait,
-    };
-
-    const SndVars = struct {
-        // 次に送信するシーケンス番号
-        nxt: u32 = 0,
-        // 未確認の最小のシーケンス番号
-        una: u32 = 0,
-        // 受信側のウィンドウサイズ
-        wnd: u16 = 0,
-        // 緊急ポインタ
-        up: u16 = 0,
-        // 最後に受信したウィンドウ更新のシーケンス番号
-        wl1: u32 = 0,
-        // 最後に受信したウィンドウ更新の確認応答番号
-        wl2: u32 = 0,
-    };
-
-    const RcvVars = struct {
-        // 次に期待するシーケンス番号
-        nxt: u32 = 0,
-        // 受信側のウィンドウサイズ
-        wnd: u16 = 0,
-        // 緊急ポインタ
-        up: u16 = 0,
-    };
-
-    const Pcb = struct {
-        state: State = .none,
-        local: udp.SocketAddr = .{},
-        remote: udp.SocketAddr = .{},
-        snd: SndVars = .{},
-        // 初期送信シーケンス番号
-        iss: u32 = 0,
-        rcv: RcvVars = .{},
-        // 初期受信シーケンス番号
-        irs: u32 = 0,
-        mss: u16 = 0,
-        buf: [65535]u8 = undefined,
-        task: sched.Task = .{},
-
-        pub fn changeState(self: *Pcb, new_state: State) void {
-            util.debugf(@src(), "{t} => {t}", .{ self.state, new_state });
-            self.state = new_state;
-        }
-    };
-
-    const SegInfo = struct {
-        seq: u32,
-        ack: u32,
-        len: u16,
-        wnd: u16,
-        up: u16,
-    };
-
     lock: platform.Lock = .{},
     pcbs: [size]Pcb = @splat(.{}),
 
@@ -322,18 +419,6 @@ const PcbTable = struct {
             }
         }
         return error.PcbTableFull;
-    }
-
-    fn release(_: *Self, pcb: *Pcb) void {
-        pcb.task.destroy() catch |err| switch (err) {
-            error.Busy => {
-                util.debugf(@src(), "pending", .{});
-                pcb.task.wakeup();
-                return;
-            },
-        };
-        pcb.* = .{};
-        util.debugf(@src(), "success", .{});
     }
 
     fn select(self: *Self, local: udp.SocketAddr, remote: udp.SocketAddr) ?*Pcb {
@@ -361,14 +446,6 @@ const PcbTable = struct {
         return candidate;
     }
 
-    fn output(_: *Self, pcb: *Pcb, flg: TcpFlags, data: []const u8) !usize {
-        const seq = if (flg.syn) pcb.iss else pcb.snd.nxt;
-        if (flg.syn or flg.fin or data.len > 0) {
-            // TODO: add retransmission queue
-        }
-        return outputSegment(seq, pcb.rcv.nxt, flg, pcb.rcv.wnd, data, pcb.local, pcb.remote);
-    }
-
     pub fn open(self: *Self, local: udp.SocketAddr, remote: udp.SocketAddr, mode: Mode) !usize {
         self.lock.acquire();
         defer self.lock.release();
@@ -378,13 +455,16 @@ const PcbTable = struct {
             return err;
         };
         const pcb = &self.pcbs[desc];
+        errdefer {
+            pcb.changeState(.closed);
+            pcb.release();
+        }
 
         util.debugf(@src(), "mode={t}, local={f}, remote={f}", .{ mode, local, remote });
         switch (mode) {
             .passive => {
                 if (self.select(local, remote)) |_| {
                     util.errorf(@src(), "address already in use", .{});
-                    self.release(pcb);
                     return error.PcbAlreadyInUse;
                 }
                 pcb.local = local;
@@ -395,7 +475,6 @@ const PcbTable = struct {
             .active => {
                 // TODO
                 util.errorf(@src(), "active open does not implement", .{});
-                self.release(pcb);
                 return error.TcpActiveOpenNotImplemented;
             },
         }
@@ -404,16 +483,12 @@ const PcbTable = struct {
         while (pcb.state == state or pcb.state == .syn_received) {
             pcb.task.sleep(&self.lock, null) catch {
                 util.debugf(@src(), "interrupted", .{});
-                pcb.changeState(.closed);
-                self.release(pcb);
                 return error.Interrupted;
             };
         }
 
         if (pcb.state != .established) {
             util.errorf(@src(), "open error: state={t}", .{pcb.state});
-            pcb.changeState(.closed);
-            self.release(pcb);
             return error.PcbOpenError;
         }
 
@@ -435,13 +510,13 @@ const PcbTable = struct {
             return error.PcbNotFound;
         };
         util.debugf(@src(), "desc={d}", .{desc});
-        _ = try self.output(pcb, .{ .rst = true }, &[_]u8{});
+        _ = try pcb.output(.{ .rst = true }, &[_]u8{});
         pcb.changeState(.closed);
-        self.release(pcb);
+        pcb.release();
     }
 
     // rfc793 - section 3.9 [Event Processing > SEGMENT ARRIVES]
-    pub fn segment_arrives(self: *Self, seg: SegInfo, flags: TcpFlags, _: []const u8, local: udp.SocketAddr, remote: udp.SocketAddr) !void {
+    pub fn segmentArrives(self: *Self, seg: SegInfo, flags: TcpFlags, _: []const u8, local: udp.SocketAddr, remote: udp.SocketAddr) !void {
         self.lock.acquire();
         defer self.lock.release();
 
@@ -458,81 +533,15 @@ const PcbTable = struct {
             if (flags.rst) {
                 return;
             }
-            if (!flags.ack) {
-                _ = try outputSegment(0, seg.seq + seg.len, .{ .rst = true, .ack = true }, 0, &[_]u8{}, local, remote);
-            } else {
-                _ = try outputSegment(seg.ack, 0, .{ .rst = true }, 0, &[_]u8{}, local, remote);
-            }
+            try replyRst(seg, local, remote);
             return;
         };
 
         util.debugf(@src(), "state={t}", .{pcb.state});
         switch (pcb.state) {
-            .listen => {
-                // 1st check for an RST
-                if (flags.rst) {
-                    return;
-                }
-
-                // 2nd check for an ACK
-                if (flags.ack) {
-                    _ = try outputSegment(seg.ack, 0, .{ .rst = true }, 0, &[_]u8{}, local, remote);
-                    return;
-                }
-
-                // 3rd check for a SYN
-                if (flags.syn) {
-                    // ignore: security/compartment check
-                    pcb.local = local;
-                    pcb.remote = remote;
-                    pcb.rcv.wnd = pcb.buf.len;
-                    pcb.rcv.nxt = seg.seq + 1;
-                    pcb.irs = seg.seq;
-                    pcb.iss = platform.random32();
-                    _ = try self.output(pcb, .{ .syn = true, .ack = true }, &[_]u8{});
-                    pcb.snd.nxt = pcb.iss + 1;
-                    pcb.snd.una = pcb.iss;
-                    pcb.changeState(.syn_received);
-                    // ignore: Note that any other incoming control or data (combined with SYN)
-                    // will be processed in the SYN-RECEIVED state, but processing of SYN and ACK
-                    // should not be repeated.
-                    return;
-                }
-
-                // 4th other text or control
-                // drop segment
-            },
-            .syn_sent => {
-                // 1st check the ACK bit
-                // 2nd check the RST bit
-                // 3rd check security and precedence (ignore)
-                // 4th check the SYN bit
-                // 5th, if neither of the SYN or RST bits is set then drop the segment and return
-                // drop segment
-            },
-            else => {
-                // 1st check sequence number
-                // 2nd check the RST bit
-                // 3rd check security and precedence (ignore)
-                // 4th check the SYN bit
-                // 5th check the ACK field
-                switch (pcb.state) {
-                    .syn_received => {
-                        if (pcb.snd.una <= seg.ack and seg.ack <= pcb.snd.nxt) {
-                            pcb.changeState(.established);
-                            pcb.task.wakeup();
-                        } else {
-                            _ = try outputSegment(seg.ack, 0, .{ .rst = true }, 0, &[_]u8{}, local, remote);
-                            return;
-                        }
-                    },
-                    else => {},
-                }
-
-                // 6th check the URG bit (ignore)
-                // 7th process the segment text
-                // 8th check the FIN bit
-            },
+            .listen => try pcb.arrivesListen(seg, local, remote),
+            .syn_sent => try pcb.arrivesSynSent(),
+            else => try pcb.arrivesOtherwise(seg, local, remote),
         }
     }
 };
@@ -560,16 +569,8 @@ fn input(ipd: *const ip.IpHdr.Decoded, data: []const u8, iface: *ip.IpIface) !vo
     util.dumpf("{f}", .{tcpd.hdr});
     util.debugdump(data);
 
-    var seg = PcbTable.SegInfo{
-        .seq = tcpd.hdr.seq,
-        .ack = tcpd.hdr.ack,
-        .len = @intCast(data.len - tcpd.hdr.hlen()),
-        .wnd = tcpd.hdr.wnd,
-        .up = tcpd.hdr.up,
-    };
-    if (tcpd.hdr.flg.syn) seg.len += 1;
-    if (tcpd.hdr.flg.fin) seg.len += 1;
-    try pcb_table.segment_arrives(seg, tcpd.hdr.flg, tcpd.payload, tcpd.hdr.dst, tcpd.hdr.src);
+    const seg: SegInfo = .init(tcpd.hdr, data.len);
+    try pcb_table.segmentArrives(seg, tcpd.hdr.flg, tcpd.payload, tcpd.hdr.dst, tcpd.hdr.src);
 }
 
 fn outputSegment(seq: u32, ack: u32, flg: TcpFlags, wnd: u16, data: []const u8, local: udp.SocketAddr, remote: udp.SocketAddr) !usize {
@@ -599,8 +600,16 @@ fn outputSegment(seq: u32, ack: u32, flg: TcpFlags, wnd: u16, data: []const u8, 
     return data.len;
 }
 
+fn replyRst(seg: SegInfo, local: udp.SocketAddr, remote: udp.SocketAddr) !void {
+    if (!seg.flg.ack) {
+        _ = try outputSegment(0, seg.seq + seg.len, .{ .rst = true, .ack = true }, 0, &[_]u8{}, local, remote);
+    } else {
+        _ = try outputSegment(seg.ack, 0, .{ .rst = true }, 0, &[_]u8{}, local, remote);
+    }
+}
+
 pub const cmd = struct {
-    pub fn open(local: udp.SocketAddr, remote: udp.SocketAddr, mode: PcbTable.Mode) !usize {
+    pub fn open(local: udp.SocketAddr, remote: udp.SocketAddr, mode: Mode) !usize {
         return pcb_table.open(local, remote, mode) catch |err| {
             util.errorf(@src(), "pcb_table.open() failure: {t}", .{err});
             return err;
