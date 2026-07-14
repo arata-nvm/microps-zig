@@ -558,6 +558,28 @@ const Pcb = struct {
         }
     }
 
+    fn startActiveOpen(self: *Pcb, local: udp.SocketAddr, remote: udp.SocketAddr) !void {
+        self.local = local;
+        self.remote = remote;
+        self.rcv.wnd = self.buf.len;
+        self.snd = .init(platform.random32());
+        _ = try self.output(.{ .syn = true }, &[_]u8{});
+        self.changeState(.syn_sent);
+    }
+
+    fn waitEstablished(self: *Pcb, lock: *platform.Lock) !void {
+        const initial = self.state;
+        while (self.state == initial or self.state == .syn_received) {
+            self.task.sleep(lock, null) catch return error.Interrupted;
+        }
+        if (self.state != .established) return error.PcbOpenError;
+    }
+
+    fn updateMss(self: *Pcb) !void {
+        const iface = ip.route.getIface(self.remote.addr) orelse return error.PcbIfaceNotFound;
+        self.mss = iface.dev().mtu - (ip.IpHdr.hdr_len_min + TcpHdr.hdr_len_min);
+    }
+
     fn output(self: *Pcb, flg: TcpFlags, data: []const u8) !usize {
         const seq = if (flg.syn) self.snd.iss else self.snd.nxt;
         const len: u32 = @as(u32, @intCast(data.len)) + flg.seqLen();
@@ -622,7 +644,7 @@ const Pcb = struct {
 
         // 1st check the ACK bit
         if (seg.flg.ack) {
-            if (seg.ack <= self.iss or seg.ack > self.snd.nxt) {
+            if (seg.ack <= self.snd.iss or seg.ack > self.snd.nxt) {
                 _ = try outputSegment(seg.ack, 0, .{ .rst = true }, 0, &[_]u8{}, local, remote);
                 return;
             }
@@ -648,7 +670,7 @@ const Pcb = struct {
                 self.snd.una = seg.ack;
                 self.cleanupRetransQueue();
             }
-            if (self.snd.una > self.iss) {
+            if (self.snd.una > self.snd.iss) {
                 self.changeState(.established);
                 _ = try self.output(.{ .ack = true }, &[_]u8{});
                 // NOTE: not specified in the RFC793, but send window initialization required
@@ -950,36 +972,22 @@ const PcbTable = struct {
                     return error.TcpAlreadyInUse;
                 }
                 util.debugf(@src(), "resolve local address, addr={f}", .{resolved_local});
-                pcb.local = resolved_local;
-                pcb.remote = remote;
-                pcb.rcv.wnd = pcb.buf.len;
-                pcb.snd = .init(platform.random32());
-                _ = pcb.output(.{ .syn = true }, &[_]u8{}) catch |err| {
-                    util.errorf(@src(), "pcb.output() failure: {t}", .{err});
-                    return error.PcbOutputFailure;
+                pcb.startActiveOpen(resolved_local, remote) catch |err| {
+                    util.errorf(@src(), "pcb.startActiveOpen() failure: {t}", .{err});
+                    return err;
                 };
-                pcb.changeState(.syn_sent);
             },
         }
 
-        const state = pcb.state;
-        while (pcb.state == state or pcb.state == .syn_received) {
-            pcb.task.sleep(&self.lock, null) catch {
-                util.debugf(@src(), "interrupted", .{});
-                return error.Interrupted;
-            };
-        }
-
-        if (pcb.state != .established) {
-            util.errorf(@src(), "open error: state={t}", .{pcb.state});
-            return error.PcbOpenError;
-        }
-
-        const iface = ip.route.getIface(pcb.remote.addr) orelse {
-            util.errorf(@src(), "iface not found", .{});
-            return error.PcbIfaceNotFound;
+        pcb.waitEstablished(&self.lock) catch |err| {
+            util.errorf(@src(), "pcb.waitEstablished() failure: {t}", .{err});
+            return err;
         };
-        pcb.mss = iface.dev().mtu - (ip.IpHdr.hdr_len_min + TcpHdr.hdr_len_min);
+        pcb.updateMss() catch |err| {
+            util.errorf(@src(), "pcb.updateMss() failure: {t}", .{err});
+            return err;
+        };
+
         util.debugf(@src(), "success, local={f}, remote={f}", .{ local, remote });
         return desc;
     }
@@ -1063,34 +1071,20 @@ const PcbTable = struct {
             util.errorf(@src(), "address already in use", .{});
             return error.TcpAlreadyInUse;
         }
-        pcb.local = resolved_local;
-        pcb.remote = remote;
-        pcb.rcv.wnd = pcb.buf.len;
-        pcb.snd = .init(platform.random32());
-        _ = pcb.output(.{ .syn = true }, &[_]u8{}) catch |err| {
-            util.errorf(@src(), "pcb.output() failure: {t}", .{err});
-            return error.PcbOutputFailure;
+
+        pcb.startActiveOpen(resolved_local, remote) catch |err| {
+            util.errorf(@src(), "pcb.startActiveOpen() failure: {t}", .{err});
+            return err;
         };
-        pcb.changeState(.syn_sent);
-
-        const state = pcb.state;
-        while (pcb.state == state or pcb.state == .syn_received) {
-            pcb.task.sleep(&self.lock, null) catch {
-                util.debugf(@src(), "interrupted", .{});
-                return error.Interrupted;
-            };
-        }
-
-        if (pcb.state != .established) {
-            util.errorf(@src(), "open error: state={t}", .{pcb.state});
-            return error.PcbOpenError;
-        }
-
-        const iface = ip.route.getIface(pcb.remote.addr) orelse {
-            util.errorf(@src(), "iface not found", .{});
-            return error.PcbIfaceNotFound;
+        pcb.waitEstablished(&self.lock) catch |err| {
+            util.errorf(@src(), "pcb.waitEstablished() failure: {t}", .{err});
+            return err;
         };
-        pcb.mss = iface.dev().mtu - (ip.IpHdr.hdr_len_min + TcpHdr.hdr_len_min);
+        pcb.updateMss() catch |err| {
+            util.errorf(@src(), "pcb.updateMss() failure: {t}", .{err});
+            return err;
+        };
+
         util.debugf(@src(), "success, local={f}, remote={f}", .{ pcb.local, pcb.remote });
     }
 
