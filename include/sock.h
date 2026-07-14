@@ -19,6 +19,7 @@
 #define IPPROTO_TCP 6
 #define IPPROTO_UDP 17
 
+#define IP_ADDR_ANY 0
 #define INADDR_ANY IP_ADDR_ANY
 
 struct in_addr {
@@ -37,6 +38,9 @@ struct sockaddr_in {
 };
 
 #define IFNAMSIZ 16
+
+#define hton16(x) __builtin_bswap16(x)
+#define ntoh16(x) __builtin_bswap16(x)
 
 extern int sock_open(int domain, int type, int protocol);
 extern int sock_close(int desc);

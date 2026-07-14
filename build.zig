@@ -27,7 +27,7 @@ pub fn build(b: *std.Build) void {
     // sock module
 
     const sock_mod = b.createModule(.{
-        .root_source_file = b.path("src/c/sock.zig"),
+        .root_source_file = b.path("src/c/root.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true, // pthread, clock_gettime
@@ -71,6 +71,33 @@ pub fn build(b: *std.Build) void {
 
     const run_step = b.step("run", "Run the test app");
     run_step.dependOn(&run_test.step);
+
+    // example/test.c application
+
+    const example_mod = b.createModule(.{
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    example_mod.addCSourceFile(.{ .file = b.path("example/test.c") });
+    example_mod.addIncludePath(b.path("include"));
+    example_mod.linkLibrary(sock_lib);
+
+    const example_exe = b.addExecutable(.{
+        .name = "example",
+        .root_module = example_mod,
+    });
+    b.installArtifact(example_exe);
+
+    const run_example = b.addRunArtifact(example_exe);
+    if (b.args) |args| {
+        run_example.addArgs(args);
+    }
+
+    const run_example_step = b.step("run-example", "Run the example app");
+    run_example_step.dependOn(&run_example.step);
+
+    // check step
 
     const check_step = b.step("check", "Check if test compiles");
     check_step.dependOn(&test_exe.step);

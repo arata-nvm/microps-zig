@@ -1,3 +1,5 @@
+const std = @import("std");
+
 const microps = @import("microps");
 
 const platform = microps.platform;
@@ -55,6 +57,7 @@ export fn sock_open(domain: c_int, typ: c_int, protocol: c_int) c_int {
 
     const s = sock_alloc() orelse return -1;
     s.* = .{
+        .used = true,
         .family = @intCast(domain),
         .type = @intCast(typ),
         .desc = switch (s.type) {
@@ -101,8 +104,8 @@ export fn sock_recvfrom(desc: c_int, buf: *anyopaque, n: usize, addr: ?*c.sockad
                 if (addr) |a| {
                     if (addrlen) |al| {
                         const p: *c.sockaddr_in = @ptrCast(@alignCast(a));
-                        p.sin_addr.s_addr = ret.remote.addr.toU32();
-                        p.sin_port = @intFromEnum(ret.remote.port);
+                        p.sin_addr.s_addr = std.mem.nativeToBig(u32, ret.remote.addr.toU32());
+                        p.sin_port = std.mem.nativeToBig(u16, @intFromEnum(ret.remote.port));
                         al.* = @sizeOf(c.sockaddr_in);
                     }
                 }
@@ -135,8 +138,8 @@ export fn sock_sendto(desc: c_int, buf: ?*const anyopaque, n: usize, addr: *c.so
                 const b = @as([*]const u8, @ptrCast(buf))[0..n];
                 const p: *c.sockaddr_in = @ptrCast(@alignCast(addr));
                 const remote: udp.SocketAddr = .{
-                    .addr = .fromU32(p.sin_addr.s_addr),
-                    .port = @enumFromInt(p.sin_port),
+                    .addr = .fromU32(std.mem.bigToNative(u32, p.sin_addr.s_addr)),
+                    .port = @enumFromInt(std.mem.bigToNative(u16, p.sin_port)),
                 };
                 const sent = udp.cmd.sendto(s.desc, b, remote) catch return -1;
                 return @intCast(sent);
@@ -166,8 +169,8 @@ export fn sock_bind(desc: c_int, addr: *c.sockaddr, _: c_int) c_int {
         c.AF_INET => {
             const p: *c.sockaddr_in = @ptrCast(@alignCast(addr));
             const local: udp.SocketAddr = .{
-                .addr = .fromU32(p.sin_addr.s_addr),
-                .port = @enumFromInt(p.sin_port),
+                .addr = .fromU32(std.mem.bigToNative(u32, p.sin_addr.s_addr)),
+                .port = @enumFromInt(std.mem.bigToNative(u16, p.sin_port)),
             };
             switch (s.type) {
                 c.SOCK_STREAM => {
@@ -234,8 +237,8 @@ export fn sock_accept(desc: c_int, addr: ?*c.sockaddr, addrlen: ?*c_int) c_int {
                 if (addr) |a| {
                     if (addrlen) |al| {
                         const p: *c.sockaddr_in = @ptrCast(@alignCast(a));
-                        p.sin_addr.s_addr = ret.remote.addr.toU32();
-                        p.sin_port = @intFromEnum(ret.remote.port);
+                        p.sin_addr.s_addr = std.mem.nativeToBig(u32, ret.remote.addr.toU32());
+                        p.sin_port = std.mem.nativeToBig(u16, @intFromEnum(ret.remote.port));
                         al.* = @sizeOf(c.sockaddr_in);
                     }
                 }
@@ -245,6 +248,7 @@ export fn sock_accept(desc: c_int, addr: ?*c.sockaddr, addrlen: ?*c_int) c_int {
 
                 const new_s = sock_alloc() orelse return -1;
                 new_s.* = .{
+                    .used = true,
                     .family = s.family,
                     .type = s.type,
                     .desc = ret.desc,
@@ -278,8 +282,8 @@ export fn sock_connect(desc: c_int, addr: *const c.sockaddr, _: c_int) c_int {
             c.SOCK_STREAM => {
                 const p: *const c.sockaddr_in = @ptrCast(@alignCast(addr));
                 const remote: udp.SocketAddr = .{
-                    .addr = .fromU32(p.sin_addr.s_addr),
-                    .port = @enumFromInt(p.sin_port),
+                    .addr = .fromU32(std.mem.bigToNative(u32, p.sin_addr.s_addr)),
+                    .port = @enumFromInt(std.mem.bigToNative(u16, p.sin_port)),
                 };
                 tcp.cmd.connect(s.desc, remote) catch return -1;
                 return 0;
