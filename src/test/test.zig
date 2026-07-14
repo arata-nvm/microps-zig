@@ -166,6 +166,6 @@ fn appMain(_: std.Io) !void {
 pub fn main(init: std.process.Init) !void {
     try setup(.{ .io = init.io, .gpa = init.arena.allocator() });
     try appMain(init.io);
-    try init.io.sleep(.fromSeconds(1), .awake);
+    try init.io.sleep(.fromSeconds(35), .awake);
     try cleanup();
 }

@@ -387,6 +387,8 @@ const QueueEntry = struct {
     }
 };
 
+const timewait: std.Io.Duration = .fromSeconds(30);
+
 const Pcb = struct {
     state: State = .none,
     local: udp.SocketAddr = .{},
@@ -401,10 +403,21 @@ const Pcb = struct {
     buf: [65535]u8 = undefined,
     task: sched.Task = .{},
     queue: util.Queue(QueueEntry) = .{},
+    tw_timer: std.Io.Timestamp = .zero,
 
     fn changeState(self: *Pcb, new_state: State) void {
         util.debugf(@src(), "{t} => {t}", .{ self.state, new_state });
         self.state = new_state;
+    }
+
+    fn setTimewaitTimer(self: *Pcb) void {
+        const now = platform.now();
+        self.tw_timer = now.addDuration(timewait);
+        util.debugf(@src(), "start time_wait timer: {d} seconds", .{timewait.toSeconds()});
+    }
+
+    fn timewaitElapsed(self: *Pcb, now: std.Io.Timestamp) bool {
+        return self.tw_timer.nanoseconds < now.nanoseconds;
     }
 
     fn processAck(self: *Pcb, seg: SegInfo) void {
@@ -593,7 +606,7 @@ const Pcb = struct {
     fn arrivesOtherwise(self: *Pcb, seg: SegInfo, data: []const u8, local: udp.SocketAddr, remote: udp.SocketAddr) !void {
         // 1st check sequence number
         const acceptable = switch (self.state) {
-            .syn_received, .established, .close_wait, .last_ack => self.rcv.accepts(seg),
+            .syn_received, .established, .fin_wait_1, .fin_wait_2, .close_wait, .last_ack, .time_wait => self.rcv.accepts(seg),
             else => false,
         };
         if (!acceptable) {
@@ -627,7 +640,7 @@ const Pcb = struct {
             else => {},
         }
         switch (self.state) {
-            .established, .close_wait => {
+            .established, .close_wait, .fin_wait_1, .fin_wait_2 => {
                 if (self.snd.ackAdvances(seg.ack)) {
                     self.processAck(seg);
                 } else if (seg.ack < self.snd.una) {
@@ -635,6 +648,20 @@ const Pcb = struct {
                 } else if (self.snd.ackIsFuture(seg.ack)) {
                     _ = try self.output(.{ .ack = true }, &[_]u8{});
                     return;
+                }
+                switch (self.state) {
+                    .fin_wait_1 => {
+                        if (seg.ack == self.snd.nxt) {
+                            self.changeState(.fin_wait_2);
+                        }
+                    },
+                    .fin_wait_2 => {
+                        // do not delete the PCB
+                    },
+                    .close_wait => {
+                        // do nothing
+                    },
+                    else => {},
                 }
             },
             .last_ack => {
@@ -644,13 +671,18 @@ const Pcb = struct {
                 }
                 return;
             },
+            .time_wait => {
+                if (seg.flg.fin) {
+                    self.setTimewaitTimer();
+                }
+            },
             else => {},
         }
 
         // 6th check the URG bit (ignore)
         // 7th process the segment text
         switch (self.state) {
-            .established => {
+            .established, .fin_wait_1, .fin_wait_2 => {
                 if (data.len > 0) {
                     if (self.rcv.nxt != seg.seq or self.rcv.wnd < data.len) {
                         // NOTE: Request the optimal segment
@@ -663,7 +695,7 @@ const Pcb = struct {
                     self.task.wakeup();
                 }
             },
-            .close_wait, .last_ack => {
+            .close_wait, .last_ack, .time_wait => {
                 // ignore segment text
             },
             else => {},
@@ -682,11 +714,21 @@ const Pcb = struct {
                     self.changeState(.close_wait);
                     self.task.wakeup();
                 },
+                .fin_wait_1 => {
+                    // TODO: simultaneous close
+                },
+                .fin_wait_2 => {
+                    self.changeState(.time_wait);
+                    self.setTimewaitTimer();
+                },
                 .close_wait => {
                     // Remain in the CLOSE-WAIT state
                 },
                 .last_ack => {
                     // Remain in the LAST-ACK state
+                },
+                .time_wait => {
+                    // Remain in the TIME-WAIT state
                 },
                 else => {},
             }
@@ -829,8 +871,10 @@ const PcbTable = struct {
                 pcb.changeState(.closed);
             },
             .syn_received, .established => {
-                _ = try pcb.output(.{ .rst = true }, &[_]u8{});
-                pcb.changeState(.closed);
+                util.debugf(@src(), "close connection", .{});
+                _ = try pcb.output(.{ .ack = true, .fin = true }, &[_]u8{});
+                pcb.snd.nxt += 1;
+                pcb.changeState(.fin_wait_1);
             },
             .close_wait => {
                 util.debugf(@src(), "close connection", .{});
@@ -838,7 +882,7 @@ const PcbTable = struct {
                 pcb.snd.nxt += 1;
                 pcb.changeState(.last_ack);
             },
-            .last_ack => {
+            .fin_wait_1, .fin_wait_2, .last_ack, .time_wait => {
                 util.errorf(@src(), "connection closing", .{});
                 return error.PcbConnectionClosing;
             },
@@ -866,14 +910,16 @@ const PcbTable = struct {
 
         var sent: usize = 0;
         while (true) {
-            if (pcb.state == .last_ack) {
-                util.errorf(@src(), "connection closing", .{});
-                return error.PcbConnectionClosing;
-            }
-
-            if (pcb.state != .established and pcb.state != .close_wait) {
-                util.errorf(@src(), "invalid state: {t}", .{pcb.state});
-                return error.PcbInvalidState;
+            switch (pcb.state) {
+                .fin_wait_1, .fin_wait_2, .last_ack, .time_wait => {
+                    util.errorf(@src(), "connection closing", .{});
+                    return error.PcbConnectionClosing;
+                },
+                .established, .close_wait => {},
+                else => {
+                    util.errorf(@src(), "invalid state: {t}", .{pcb.state});
+                    return error.PcbInvalidState;
+                },
             }
 
             blk: {
@@ -914,14 +960,22 @@ const PcbTable = struct {
         };
 
         while (true) {
-            if (pcb.state == .last_ack or (pcb.state == .close_wait and pcb.availableBuf() == 0)) {
-                util.debugf(@src(), "connection closing", .{});
-                return 0;
-            }
-
-            if (pcb.state != .established) {
-                util.errorf(@src(), "invalid state: {t}", .{pcb.state});
-                return error.PcbInvalidState;
+            switch (pcb.state) {
+                .last_ack, .time_wait => {
+                    util.debugf(@src(), "connection closing", .{});
+                    return 0;
+                },
+                .close_wait => {
+                    if (pcb.availableBuf() == 0) {
+                        util.debugf(@src(), "connection closing", .{});
+                        return 0;
+                    }
+                },
+                .established, .fin_wait_1, .fin_wait_2 => {},
+                else => {
+                    util.errorf(@src(), "invalid state: {t}", .{pcb.state});
+                    return error.PcbInvalidState;
+                },
             }
 
             if (pcb.availableBuf() == 0) {
@@ -970,8 +1024,15 @@ const PcbTable = struct {
         self.lock.acquire();
         defer self.lock.release();
 
-        for (&self.pcbs) |*pcb| {
+        const now = platform.now();
+        for (&self.pcbs, 0..) |*pcb, desc| {
             if (pcb.state == .none) {
+                continue;
+            }
+            if (pcb.state == .time_wait and pcb.timewaitElapsed(now)) {
+                util.debugf(@src(), "timewait has elapsed, desc={d}", .{desc});
+                pcb.changeState(.closed);
+                pcb.release();
                 continue;
             }
             pcb.emitRetrans() catch |err| {
