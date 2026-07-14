@@ -1,14 +1,19 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{
-        .default_target = .{ .os_tag = .linux },
-    });
+    const target = b.standardTargetOptions(.{ .default_target = .{ .os_tag = .linux } });
     const optimize = b.standardOptimizeOption(.{});
 
+    // build options
+
     const hexdump = b.option(bool, "hexdump", "Enable debugdump output") orelse false;
+
     const options = b.addOptions();
     options.addOption(bool, "hexdump", hexdump);
+
+    const options_mod = options.createModule();
+
+    // microps module
 
     const microps_mod = b.createModule(.{
         .root_source_file = b.path("src/microps.zig"),
@@ -16,7 +21,10 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true, // pthread, clock_gettime
     });
-    microps_mod.addImport("build_options", options.createModule());
+
+    microps_mod.addImport("build_options", options_mod);
+
+    // test application
 
     const test_mod = b.createModule(.{
         .root_source_file = b.path("src/test/test.zig"),
@@ -32,20 +40,21 @@ pub fn build(b: *std.Build) void {
         .name = "test",
         .root_module = test_mod,
     });
+
     b.installArtifact(test_exe);
 
-    const run_cmd = b.addRunArtifact(test_exe);
-    run_cmd.step.dependOn(b.getInstallStep());
+    const run_test = b.addRunArtifact(test_exe);
+    if (b.args) |args| {
+        run_test.addArgs(args);
+    }
+
     const run_step = b.step("run", "Run the test app");
-    run_step.dependOn(&run_cmd.step);
+    run_step.dependOn(&run_test.step);
 
-    const test_exe_check = b.addExecutable(.{
-        .name = "test",
-        .root_module = test_mod,
-    });
+    const check_step = b.step("check", "Check if test compiles");
+    check_step.dependOn(&test_exe.step);
 
-    const check = b.step("check", "Check if test compiles");
-    check.dependOn(&test_exe_check.step);
+    // tap application
 
     const tap_mod = b.createModule(.{
         .root_source_file = b.path("src/test/tap.zig"),
@@ -61,19 +70,31 @@ pub fn build(b: *std.Build) void {
         .name = "tap",
         .root_module = tap_mod,
     });
+
     b.installArtifact(tap_exe);
 
-    const run_tap_cmd = b.addRunArtifact(tap_exe);
-    run_tap_cmd.step.dependOn(b.getInstallStep());
-    if (b.args) |args| run_tap_cmd.addArgs(args);
-    const run_tap_step = b.step("run-tap", "Run the tap app");
-    run_tap_step.dependOn(&run_tap_cmd.step);
+    const run_tap = b.addRunArtifact(tap_exe);
+    if (b.args) |args| {
+        run_tap.addArgs(args);
+    }
 
-    const unit_tests = b.addTest(.{ .root_module = microps_mod });
+    const run_tap_step = b.step("run-tap", "Run the tap app");
+    run_tap_step.dependOn(&run_tap.step);
+
+    // unit tests
+
+    const unit_tests = b.addTest(.{
+        .root_module = microps_mod,
+    });
+
     const run_unit_tests = b.addRunArtifact(unit_tests);
+
     run_unit_tests.skip_foreign_checks = true;
-    const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_unit_tests.step);
+
+    const unit_test_step = b.step("test", "Run unit tests");
+    unit_test_step.dependOn(&run_unit_tests.step);
+
+    // tap device setup
 
     const tap_cmd = b.addSystemCommand(&.{
         "sh", "-c",
@@ -87,7 +108,9 @@ pub fn build(b: *std.Build) void {
         \\   ip addr show tap0
         \\ )
     });
+
     tap_cmd.has_side_effects = true;
+
     const tap_step = b.step("tap", "Create and configure tap0 device");
     tap_step.dependOn(&tap_cmd.step);
 }
