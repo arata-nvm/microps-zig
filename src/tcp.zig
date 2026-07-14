@@ -246,6 +246,8 @@ const State = enum {
 };
 
 const SndVars = struct {
+    const Self = @This();
+
     // 次に送信するシーケンス番号
     nxt: u32 = 0,
     // 未確認の最小のシーケンス番号
@@ -258,15 +260,67 @@ const SndVars = struct {
     wl1: u32 = 0,
     // 最後に受信したウィンドウ更新の確認応答番号
     wl2: u32 = 0,
+
+    fn ackAcceptable(self: Self, ack: u32) bool {
+        return self.una <= ack and ack <= self.nxt;
+    }
+
+    fn ackAdvances(self: Self, ack: u32) bool {
+        return self.una < ack and ack <= self.nxt;
+    }
+
+    fn ackIsFuture(self: Self, ack: u32) bool {
+        return self.nxt < ack;
+    }
+
+    fn shouldUpdateWindow(self: Self, seg: SegInfo) bool {
+        return self.wl1 < seg.seq or (self.wl1 == seg.seq and self.wl2 <= seg.seq);
+    }
+
+    fn updateWindow(self: *Self, seg: SegInfo) void {
+        self.wnd = seg.wnd;
+        self.wl1 = seg.seq;
+        self.wl2 = seg.ack;
+    }
+
+    fn inFlight(self: Self) u32 {
+        return self.nxt - self.una;
+    }
+
+    fn usableWindow(self: Self) u32 {
+        return self.wnd - self.inFlight();
+    }
 };
 
 const RcvVars = struct {
+    const Self = @This();
+
     // 次に期待するシーケンス番号
     nxt: u32 = 0,
     // 受信側のウィンドウサイズ
     wnd: u16 = 0,
     // 緊急ポインタ
     up: u16 = 0,
+
+    fn inWindow(self: Self, seq: u32) bool {
+        return self.nxt <= seq and seq < self.nxt + self.wnd;
+    }
+
+    fn accepts(self: Self, seg: SegInfo) bool {
+        if (seg.len == 0) {
+            if (self.wnd == 0) {
+                return seg.seq == self.nxt;
+            } else {
+                return self.inWindow(seg.seq);
+            }
+        } else {
+            if (self.wnd == 0) {
+                return false;
+            } else {
+                return self.inWindow(seg.seq) and self.inWindow(seg.seq + seg.len - 1);
+            }
+        }
+    }
 };
 
 const SegInfo = struct {
@@ -301,12 +355,44 @@ const Pcb = struct {
     buf: [65535]u8 = undefined,
     task: sched.Task = .{},
 
-    pub fn changeState(self: *Pcb, new_state: State) void {
+    fn changeState(self: *Pcb, new_state: State) void {
         util.debugf(@src(), "{t} => {t}", .{ self.state, new_state });
         self.state = new_state;
     }
 
-    pub fn release(self: *Pcb) void {
+    fn processAck(self: *Pcb, seg: SegInfo) void {
+        self.snd.una = seg.ack;
+        // TODO: Any segments on the retransmission queue
+        //       which are thereby entirely acknowledged are removed
+        // ignore: Users should receive positive acknowledgments for buffers
+        //         which have been SENT and fully acknowledged
+        //         (i.e., SEND buffer should be returned with "ok" response)
+        if (self.snd.shouldUpdateWindow(seg)) {
+            self.snd.updateWindow(seg);
+        }
+    }
+
+    fn storeBuf(self: *Pcb, seg: SegInfo, data: []const u8) void {
+        const offset = self.buf.len - self.rcv.wnd;
+        @memcpy(self.buf[offset .. offset + data.len], data);
+        self.rcv.nxt = @intCast(seg.seq + data.len);
+        self.rcv.wnd -= @intCast(data.len);
+    }
+
+    fn availableBuf(self: *const Pcb) usize {
+        return self.buf.len - self.rcv.wnd;
+    }
+
+    fn readBuf(self: *Pcb, buf: []u8) usize {
+        const remain = self.availableBuf();
+        const len = @min(buf.len, remain);
+        @memcpy(buf[0..len], self.buf[0..len]);
+        @memmove(self.buf[0 .. remain - len], self.buf[len..remain]);
+        self.rcv.wnd += @intCast(len);
+        return len;
+    }
+
+    fn release(self: *Pcb) void {
         self.task.destroy() catch |err| switch (err) {
             error.Busy => {
                 util.debugf(@src(), "pending", .{});
@@ -318,7 +404,7 @@ const Pcb = struct {
         util.debugf(@src(), "success", .{});
     }
 
-    pub fn output(self: *Pcb, flg: TcpFlags, data: []const u8) !usize {
+    fn output(self: *Pcb, flg: TcpFlags, data: []const u8) !usize {
         const seq = if (flg.syn) self.iss else self.snd.nxt;
         if (flg.syn or flg.fin or data.len > 0) {
             // TODO: add retransmission queue
@@ -326,7 +412,7 @@ const Pcb = struct {
         return outputSegment(seq, self.rcv.nxt, flg, self.rcv.wnd, data, self.local, self.remote);
     }
 
-    pub fn arrivesListen(self: *Pcb, seg: SegInfo, local: udp.SocketAddr, remote: udp.SocketAddr) !void {
+    fn arrivesListen(self: *Pcb, seg: SegInfo, local: udp.SocketAddr, remote: udp.SocketAddr) !void {
         // 1st check for an RST
         if (seg.flg.rst) {
             return;
@@ -361,7 +447,7 @@ const Pcb = struct {
         // drop segment
     }
 
-    pub fn arrivesSynSent(_: *Pcb) !void {
+    fn arrivesSynSent(_: *Pcb) !void {
         // 1st check the ACK bit
         // 2nd check the RST bit
         // 3rd check security and precedence (ignore)
@@ -370,32 +456,15 @@ const Pcb = struct {
         // drop segment
     }
 
-    pub fn arrivesOtherwise(self: *Pcb, seg: SegInfo, data: []const u8, local: udp.SocketAddr, remote: udp.SocketAddr) !void {
+    fn arrivesOtherwise(self: *Pcb, seg: SegInfo, data: []const u8, local: udp.SocketAddr, remote: udp.SocketAddr) !void {
         // 1st check sequence number
-        var acceptable = false;
-        switch (self.state) {
-            .syn_received, .established => {
-                if (seg.len == 0) {
-                    if (self.rcv.wnd == 0) {
-                        acceptable = seg.seq == self.rcv.nxt;
-                    } else {
-                        acceptable = self.rcv.nxt <= seg.seq and seg.seq < self.rcv.nxt + self.rcv.wnd;
-                    }
-                } else {
-                    if (self.rcv.wnd == 0) {
-                        // not acceptable
-                    } else {
-                        const c1 = self.rcv.nxt <= seg.seq and seg.seq < self.rcv.nxt + self.rcv.wnd;
-                        const c2 = self.rcv.nxt <= seg.seq + seg.len - 1 and seg.seq + seg.len - 1 < self.rcv.nxt + self.rcv.wnd;
-                        acceptable = c1 or c2;
-                    }
-                }
-            },
-            else => {},
-        }
+        const acceptable = switch (self.state) {
+            .syn_received, .established => self.rcv.accepts(seg),
+            else => false,
+        };
         if (!acceptable) {
             if (!seg.flg.rst) {
-                _ = try self.output(.{ .rst = true }, &[_]u8{});
+                _ = try self.output(.{ .ack = true }, &[_]u8{});
             }
             return;
         }
@@ -413,7 +482,7 @@ const Pcb = struct {
         // 5th check the ACK field
         switch (self.state) {
             .syn_received => {
-                if (self.snd.una <= seg.ack and seg.ack <= self.snd.nxt) {
+                if (self.snd.ackAcceptable(seg.ack)) {
                     self.changeState(.established);
                     self.task.wakeup();
                 } else {
@@ -425,21 +494,11 @@ const Pcb = struct {
         }
         switch (self.state) {
             .established => {
-                if (self.snd.una < seg.ack and seg.ack <= self.snd.nxt) {
-                    self.snd.una = seg.ack;
-                    // TODO: Any segments on the retransmission queue
-                    //       which are thereby entirely acknowledged are removed
-                    // ignore: Users should receive positive acknowledgments for buffers
-                    //         which have been SENT and fully acknowledged
-                    //         (i.e., SEND buffer should be returned with "ok" response)
-                    if (self.snd.wl1 < seg.seq or (self.snd.wl1 == seg.seq and self.snd.wl2 <= seg.ack)) {
-                        self.snd.wnd = seg.wnd;
-                        self.snd.wl1 = seg.seq;
-                        self.snd.wl2 = seg.ack;
-                    }
+                if (self.snd.ackAdvances(seg.ack)) {
+                    self.processAck(seg);
                 } else if (seg.ack < self.snd.una) {
                     // ignore
-                } else if (self.snd.nxt < seg.ack) {
+                } else if (self.snd.ackIsFuture(seg.ack)) {
                     _ = try self.output(.{ .ack = true }, &[_]u8{});
                     return;
                 }
@@ -458,10 +517,7 @@ const Pcb = struct {
                         return;
                     }
                     util.debugf(@src(), "copy segment text, len={d}, wnd={d}", .{ data.len, self.rcv.wnd });
-                    const offset = self.buf.len - self.rcv.wnd;
-                    @memcpy(self.buf[offset .. offset + data.len], data);
-                    self.rcv.nxt = @intCast(seg.seq + data.len);
-                    self.rcv.wnd -= @intCast(data.len);
+                    self.storeBuf(seg, data);
                     _ = try self.output(.{ .ack = true }, &[_]u8{});
                     self.task.wakeup();
                 }
@@ -611,7 +667,7 @@ const PcbTable = struct {
 
             blk: {
                 while (sent < data.len) {
-                    const cap = pcb.snd.wnd - (pcb.snd.nxt - pcb.snd.una);
+                    const cap = pcb.snd.usableWindow();
                     if (cap == 0) {
                         pcb.task.sleep(&self.lock, null) catch {
                             util.debugf(@src(), "interrupted", .{});
@@ -652,8 +708,7 @@ const PcbTable = struct {
                 return error.PcbInvalidState;
             }
 
-            const remain = pcb.buf.len - pcb.rcv.wnd;
-            if (remain == 0) {
+            if (pcb.availableBuf() == 0) {
                 pcb.task.sleep(&self.lock, null) catch {
                     util.debugf(@src(), "interrupted", .{});
                     return error.Interrupted;
@@ -661,11 +716,7 @@ const PcbTable = struct {
                 continue;
             }
 
-            const len = @min(buf.len, remain);
-            @memcpy(buf[0..len], pcb.buf[0..len]);
-            @memmove(pcb.buf[0 .. remain - len], pcb.buf[len..remain]);
-            pcb.rcv.wnd += @intCast(len);
-            return len;
+            return pcb.readBuf(buf);
         }
     }
 
