@@ -580,6 +580,11 @@ const Pcb = struct {
         self.mss = iface.dev().mtu - (ip.IpHdr.hdr_len_min + TcpHdr.hdr_len_min);
     }
 
+    fn drop(self: *Pcb) void {
+        self.changeState(.closed);
+        self.release();
+    }
+
     fn output(self: *Pcb, flg: TcpFlags, data: []const u8) !usize {
         const seq = if (flg.syn) self.snd.iss else self.snd.nxt;
         const len: u32 = @as(u32, @intCast(data.len)) + flg.seqLen();
@@ -655,8 +660,7 @@ const Pcb = struct {
         if (seg.flg.rst) {
             if (acceptable) {
                 util.errorf(@src(), "connection reset", .{});
-                self.changeState(.closed);
-                self.release();
+                self.drop();
             }
             // drop segment
             return;
@@ -716,23 +720,20 @@ const Pcb = struct {
         switch (self.state) {
             .syn_received => {
                 if (seg.flg.rst) {
-                    self.changeState(.closed);
-                    self.release();
+                    self.drop();
                     return;
                 }
             },
             .established, .fin_wait_1, .fin_wait_2, .close_wait => {
                 if (seg.flg.rst) {
                     util.errorf(@src(), "connection reset", .{});
-                    self.changeState(.closed);
-                    self.release();
+                    self.drop();
                     return;
                 }
             },
             .closing, .last_ack, .time_wait => {
                 if (seg.flg.rst) {
-                    self.changeState(.closed);
-                    self.release();
+                    self.drop();
                     return;
                 }
             },
@@ -746,8 +747,7 @@ const Pcb = struct {
                 if (seg.flg.syn) {
                     _ = try self.output(.{ .rst = true }, &[_]u8{});
                     util.errorf(@src(), "connection reset", .{});
-                    self.changeState(.closed);
-                    self.release();
+                    self.drop();
                     return;
                 }
             },
@@ -810,8 +810,7 @@ const Pcb = struct {
             },
             .last_ack => {
                 if (seg.ack == self.snd.nxt) {
-                    self.changeState(.closed);
-                    self.release();
+                    self.drop();
                 }
                 return;
             },
@@ -948,10 +947,7 @@ const PcbTable = struct {
             return err;
         };
         const pcb = &self.pcbs[desc];
-        errdefer {
-            pcb.changeState(.closed);
-            pcb.release();
-        }
+        errdefer self.drop();
 
         util.debugf(@src(), "mode={t}, local={f}, remote={f}", .{ mode, local, remote });
         switch (mode) {
@@ -1059,10 +1055,7 @@ const PcbTable = struct {
             util.errorf(@src(), "pcb not found: desc={d}", .{desc});
             return error.PcbNotFound;
         };
-        errdefer {
-            pcb.changeState(.closed);
-            pcb.release();
-        }
+        errdefer self.drop();
 
         util.debugf(@src(), "local={f}, remote={f}", .{ pcb.local, remote });
 
@@ -1215,8 +1208,7 @@ const PcbTable = struct {
                     const slen = @min(pcb.mss, data.len - sent, cap);
                     _ = pcb.output(.{ .ack = true, .psh = true }, data[sent .. sent + slen]) catch |err| {
                         util.errorf(@src(), "pcb.output() failure: {t}", .{err});
-                        pcb.changeState(.closed);
-                        pcb.release();
+                        pcb.drop();
                         return error.PcbOutputFailure;
                     };
                     sent += slen;
@@ -1307,8 +1299,7 @@ const PcbTable = struct {
             }
             if (pcb.state == .time_wait and pcb.timewaitElapsed(now)) {
                 util.debugf(@src(), "timewait has elapsed, desc={d}", .{desc});
-                pcb.changeState(.closed);
-                pcb.release();
+                pcb.drop();
                 continue;
             }
             pcb.emitRetrans() catch |err| {
