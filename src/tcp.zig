@@ -577,6 +577,16 @@ const Pcb = struct {
         }
 
         // 2nd check the RST bit
+        if (seg.flg.rst) {
+            if (acceptable) {
+                util.errorf(@src(), "connection reset", .{});
+                self.changeState(.closed);
+                self.release();
+            }
+            // drop segment
+            return;
+        }
+
         // 3rd check security and precedence (ignore)
         // 4th check the SYN bit
         if (seg.flg.syn) {
@@ -595,7 +605,12 @@ const Pcb = struct {
                 // ignore: continue processing at the sixth step below where the URG bit is checked
                 return;
             } else {
-                // TODO: simmultaneous open
+                // simultaneous open
+                self.changeState(.syn_received);
+                _ = try self.output(.{ .syn = true, .ack = true }, &[_]u8{});
+                // ignore: If there are other controls or text in the segment,
+                //         queue them for processing after the ESTABLISHED state has been reached
+                return;
             }
         }
 
@@ -606,7 +621,7 @@ const Pcb = struct {
     fn arrivesOtherwise(self: *Pcb, seg: SegInfo, data: []const u8, local: udp.SocketAddr, remote: udp.SocketAddr) !void {
         // 1st check sequence number
         const acceptable = switch (self.state) {
-            .syn_received, .established, .fin_wait_1, .fin_wait_2, .close_wait, .last_ack, .time_wait => self.rcv.accepts(seg),
+            .syn_received, .established, .fin_wait_1, .fin_wait_2, .close_wait, .closing, .last_ack, .time_wait => self.rcv.accepts(seg),
             else => false,
         };
         if (!acceptable) {
@@ -624,8 +639,47 @@ const Pcb = struct {
         // numbers may be held for later processing.
 
         // 2nd check the RST bit
+        switch (self.state) {
+            .syn_received => {
+                if (seg.flg.rst) {
+                    self.changeState(.closed);
+                    self.release();
+                    return;
+                }
+            },
+            .established, .fin_wait_1, .fin_wait_2, .close_wait => {
+                if (seg.flg.rst) {
+                    util.errorf(@src(), "connection reset", .{});
+                    self.changeState(.closed);
+                    self.release();
+                    return;
+                }
+            },
+            .closing, .last_ack, .time_wait => {
+                if (seg.flg.rst) {
+                    self.changeState(.closed);
+                    self.release();
+                    return;
+                }
+            },
+            else => {},
+        }
+
         // 3rd check security and precedence (ignore)
         // 4th check the SYN bit
+        switch (self.state) {
+            .syn_received, .established, .fin_wait_1, .fin_wait_2, .close_wait, .closing, .last_ack, .time_wait => {
+                if (seg.flg.syn) {
+                    _ = try self.output(seg.flg, &[_]u8{});
+                    util.errorf(@src(), "connection reset", .{});
+                    self.changeState(.closed);
+                    self.release();
+                    return;
+                }
+            },
+            else => {},
+        }
+
         // 5th check the ACK field
         switch (self.state) {
             .syn_received => {
@@ -640,7 +694,7 @@ const Pcb = struct {
             else => {},
         }
         switch (self.state) {
-            .established, .close_wait, .fin_wait_1, .fin_wait_2 => {
+            .established, .fin_wait_1, .fin_wait_2, .close_wait, .closing => {
                 if (self.snd.ackAdvances(seg.ack)) {
                     self.processAck(seg);
                 } else if (seg.ack < self.snd.una) {
@@ -660,6 +714,14 @@ const Pcb = struct {
                     },
                     .close_wait => {
                         // do nothing
+                    },
+                    .closing => {
+                        if (seg.ack == self.snd.nxt) {
+                            self.changeState(.time_wait);
+                            // NOTE: set 2MSL timer, although it is not explicitly stated in the RFC
+                            self.setTimewaitTimer();
+                            self.task.wakeup();
+                        }
                     },
                     else => {},
                 }
@@ -695,7 +757,7 @@ const Pcb = struct {
                     self.task.wakeup();
                 }
             },
-            .close_wait, .last_ack, .time_wait => {
+            .close_wait, .closing, .last_ack, .time_wait => {
                 // ignore segment text
             },
             else => {},
@@ -715,7 +777,12 @@ const Pcb = struct {
                     self.task.wakeup();
                 },
                 .fin_wait_1 => {
-                    // TODO: simultaneous close
+                    if (seg.ack == self.snd.nxt) {
+                        self.changeState(.time_wait);
+                        self.setTimewaitTimer();
+                    } else {
+                        self.changeState(.closing);
+                    }
                 },
                 .fin_wait_2 => {
                     self.changeState(.time_wait);
@@ -723,6 +790,9 @@ const Pcb = struct {
                 },
                 .close_wait => {
                     // Remain in the CLOSE-WAIT state
+                },
+                .closing => {
+                    // Remain in the CLOSING state
                 },
                 .last_ack => {
                     // Remain in the LAST-ACK state
@@ -882,7 +952,7 @@ const PcbTable = struct {
                 pcb.snd.nxt += 1;
                 pcb.changeState(.last_ack);
             },
-            .fin_wait_1, .fin_wait_2, .last_ack, .time_wait => {
+            .fin_wait_1, .fin_wait_2, .closing, .last_ack, .time_wait => {
                 util.errorf(@src(), "connection closing", .{});
                 return error.PcbConnectionClosing;
             },
@@ -911,7 +981,7 @@ const PcbTable = struct {
         var sent: usize = 0;
         while (true) {
             switch (pcb.state) {
-                .fin_wait_1, .fin_wait_2, .last_ack, .time_wait => {
+                .fin_wait_1, .fin_wait_2, .closing, .last_ack, .time_wait => {
                     util.errorf(@src(), "connection closing", .{});
                     return error.PcbConnectionClosing;
                 },
@@ -961,7 +1031,7 @@ const PcbTable = struct {
 
         while (true) {
             switch (pcb.state) {
-                .last_ack, .time_wait => {
+                .closing, .last_ack, .time_wait => {
                     util.debugf(@src(), "connection closing", .{});
                     return 0;
                 },
