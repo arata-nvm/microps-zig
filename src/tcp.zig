@@ -391,6 +391,7 @@ const timewait: std.Io.Duration = .fromSeconds(30);
 
 const Pcb = struct {
     state: State = .none,
+    mode: PcbMode = .socket,
     local: udp.SocketAddr = .{},
     remote: udp.SocketAddr = .{},
     snd: SndVars = .{},
@@ -404,6 +405,13 @@ const Pcb = struct {
     task: sched.Task = .{},
     queue: util.Queue(QueueEntry) = .{},
     tw_timer: std.Io.Timestamp = .zero,
+    parent: ?*Pcb = null,
+    backlog: util.Queue(*Pcb) = .{},
+    backlog_max: usize = 0,
+
+    const PcbMode = enum {
+        socket,
+    };
 
     fn changeState(self: *Pcb, new_state: State) void {
         util.debugf(@src(), "{t} => {t}", .{ self.state, new_state });
@@ -464,6 +472,14 @@ const Pcb = struct {
         while (self.queue.pop()) |entry| {
             util.debugf(@src(), "free queue entry", .{});
             allocator.free(entry.data);
+        }
+
+        while (self.backlog.pop()) |b| {
+            util.debugf(@src(), "release backlog entry, state={t}", .{b.state});
+            if (b.state != .closed) {
+                _ = b.output(.{ .rst = true }, &[_]u8{}) catch {};
+            }
+            b.release();
         }
 
         self.* = .{};
@@ -544,16 +560,32 @@ const Pcb = struct {
         // 3rd check for a SYN
         if (seg.flg.syn) {
             // ignore: security/compartment check
-            self.local = local;
-            self.remote = remote;
-            self.rcv.wnd = self.buf.len;
-            self.rcv.nxt = seg.seq + 1;
-            self.irs = seg.seq;
-            self.iss = platform.random32();
-            _ = try self.output(.{ .syn = true, .ack = true }, &[_]u8{});
-            self.snd.nxt = self.iss + 1;
-            self.snd.una = self.iss;
-            self.changeState(.syn_received);
+            var pcb = self;
+            if (self.mode == .socket) {
+                if (self.backlog_max < self.backlog.num) {
+                    util.warnf(@src(), "backlog is full", .{});
+                    return;
+                }
+                const new_desc = pcb_table.alloc() catch |err| {
+                    util.errorf(@src(), "pcb_table.alloc() failure: {t}", .{err});
+                    return err;
+                };
+                const new_pcb = &pcb_table.pcbs[new_desc];
+                util.debugf(@src(), "allocate PCB for new connection, desc={d}, state={t}", .{ new_desc, new_pcb.state });
+                new_pcb.parent = self;
+                pcb = new_pcb;
+            }
+
+            pcb.local = local;
+            pcb.remote = remote;
+            pcb.rcv.wnd = pcb.buf.len;
+            pcb.rcv.nxt = seg.seq + 1;
+            pcb.irs = seg.seq;
+            pcb.iss = platform.random32();
+            _ = try pcb.output(.{ .syn = true, .ack = true }, &[_]u8{});
+            pcb.snd.nxt = pcb.iss + 1;
+            pcb.snd.una = pcb.iss;
+            pcb.changeState(.syn_received);
             // ignore: Note that any other incoming control or data (combined with SYN)
             // will be processed in the SYN-RECEIVED state, but processing of SYN and ACK
             // should not be repeated.
@@ -681,11 +713,19 @@ const Pcb = struct {
         }
 
         // 5th check the ACK field
+        if (!seg.flg.ack) {
+            // drop segment
+            return;
+        }
         switch (self.state) {
             .syn_received => {
                 if (self.snd.ackAcceptable(seg.ack)) {
                     self.changeState(.established);
                     self.task.wakeup();
+                    if (self.parent) |parent| {
+                        try parent.backlog.push(self);
+                        parent.task.wakeup();
+                    }
                 } else {
                     try replyRst(seg, local, remote);
                     return;
@@ -922,6 +962,20 @@ const PcbTable = struct {
         return desc;
     }
 
+    pub fn socket(self: *Self) !usize {
+        self.lock.acquire();
+        defer self.lock.release();
+
+        const desc = self.alloc() catch |err| {
+            util.errorf(@src(), "PcbTable.alloc() failure: {t}", .{err});
+            return err;
+        };
+        const pcb = &self.pcbs[desc];
+
+        pcb.mode = .socket;
+        return desc;
+    }
+
     pub fn close(self: *Self, desc: usize) !void {
         self.lock.acquire();
         defer self.lock.release();
@@ -966,6 +1020,144 @@ const PcbTable = struct {
             pcb.release();
         } else {
             pcb.task.wakeup();
+        }
+    }
+
+    pub fn connect(self: *Self, desc: usize, remote: udp.SocketAddr) !void {
+        self.lock.acquire();
+        defer self.lock.release();
+
+        const pcb = self.get(desc) orelse {
+            util.errorf(@src(), "pcb not found: desc={d}", .{desc});
+            return error.PcbNotFound;
+        };
+        errdefer {
+            pcb.changeState(.closed);
+            pcb.release();
+        }
+
+        util.debugf(@src(), "local={f}, remote={f}", .{ pcb.local, remote });
+
+        const resolved_local = try self.resolveLocal(pcb.local, remote);
+        pcb.local = resolved_local;
+        pcb.remote = remote;
+        pcb.rcv.wnd = pcb.buf.len;
+        pcb.iss = platform.random32();
+        _ = pcb.output(.{ .syn = true }, &[_]u8{}) catch |err| {
+            util.errorf(@src(), "pcb.output() failure: {t}", .{err});
+            return error.PcbOutputFailure;
+        };
+        pcb.snd.una = pcb.iss;
+        pcb.snd.nxt = pcb.iss + 1;
+        pcb.changeState(.syn_sent);
+
+        const state = pcb.state;
+        while (pcb.state == state or pcb.state == .syn_received) {
+            pcb.task.sleep(&self.lock, null) catch {
+                util.debugf(@src(), "interrupted", .{});
+                return error.Interrupted;
+            };
+        }
+
+        if (pcb.state != .established) {
+            util.errorf(@src(), "open error: state={t}", .{pcb.state});
+            return error.PcbOpenError;
+        }
+
+        const iface = ip.route.getIface(pcb.remote.addr) orelse {
+            util.errorf(@src(), "iface not found", .{});
+            return error.PcbIfaceNotFound;
+        };
+        pcb.mss = iface.dev().mtu - (ip.IpHdr.hdr_len_min + TcpHdr.hdr_len_min);
+        util.debugf(@src(), "success, local={f}, remote={f}", .{ pcb.local, pcb.remote });
+        return desc;
+    }
+
+    pub fn bind(self: *Self, desc: usize, local: udp.SocketAddr) !void {
+        self.lock.acquire();
+        defer self.lock.release();
+
+        const pcb = self.get(desc) orelse {
+            util.errorf(@src(), "pcb not found: desc={d}", .{desc});
+            return error.PcbNotFound;
+        };
+
+        if (local.port == udp.Port.unspecified) {
+            util.errorf(@src(), "invalid port", .{});
+            return error.PcbInvalidPort;
+        }
+        if (pcb.state != .closed) {
+            util.errorf(@src(), "pcb is not CLOSED state", .{});
+            return error.PcbNotClosedState;
+        }
+        if (self.select(local, udp.SocketAddr.any)) |e| {
+            util.errorf(@src(), "already bound, exist={f}", .{e.local});
+            return error.PcbAlreadyBound;
+        }
+        pcb.local = local;
+        util.debugf(@src(), "success, local={f}", .{pcb.local});
+    }
+
+    pub fn listen(self: *Self, desc: usize, backlog: usize) !void {
+        self.lock.acquire();
+        defer self.lock.release();
+
+        const pcb = self.get(desc) orelse {
+            util.errorf(@src(), "pcb not found: desc={d}", .{desc});
+            return error.PcbNotFound;
+        };
+
+        if (pcb.local.port == udp.Port.unspecified) {
+            util.errorf(@src(), "pcb is not bound", .{});
+            return error.PcbNotBound;
+        }
+        if (pcb.state != .closed) {
+            util.errorf(@src(), "pcb is not CLOSED state", .{});
+            return error.NotClosedState;
+        }
+        pcb.backlog_max = backlog;
+        pcb.changeState(.listen);
+    }
+
+    pub fn accept(self: *Self, desc: usize) !AcceptResult {
+        self.lock.acquire();
+        defer self.lock.release();
+
+        const pcb = self.get(desc) orelse {
+            util.errorf(@src(), "pcb not found: desc={d}", .{desc});
+            return error.NotFound;
+        };
+
+        if (pcb.state != .listen) {
+            util.errorf(@src(), "not in LISTEN state", .{});
+            return error.NotListenState;
+        }
+        while (true) {
+            const new_pcb = pcb.backlog.pop() orelse {
+                pcb.task.sleep(&self.lock, null) catch |err| {
+                    util.debugf(@src(), "interrupted", .{});
+                    return err;
+                };
+                if (pcb.state == .closed) {
+                    util.debugf(@src(), "closed", .{});
+                    pcb.release();
+                    return error.Closed;
+                }
+                continue;
+            };
+
+            const remote = new_pcb.remote;
+            const iface = ip.route.getIface(remote.addr) orelse {
+                util.errorf(@src(), "iface not found that can reach foreign address, addr={f}", .{remote.addr});
+                return error.PcbNoRoute;
+            };
+            new_pcb.mss = iface.dev().mtu - (ip.IpHdr.hdr_len_min + TcpHdr.hdr_len_min);
+            const new_desc = @divExact(@intFromPtr(new_pcb) - @intFromPtr(&pcb_table.pcbs[0]), @sizeOf(Pcb));
+            util.debugf(@src(), "success, desc={d}, local={f}, remote={f}", .{ new_desc, new_pcb.local, new_pcb.remote });
+            return .{
+                .desc = new_desc,
+                .remote = remote,
+            };
         }
     }
 
@@ -1146,6 +1338,11 @@ const PcbTable = struct {
 
 var pcb_table: PcbTable = .{};
 
+pub const AcceptResult = struct {
+    desc: usize,
+    remote: udp.SocketAddr,
+};
+
 pub fn init() !void {
     ip.registerProtocol(.tcp, input) catch |err| {
         util.errorf(@src(), "ip.registerProtocol() failure: {t}", .{err});
@@ -1222,9 +1419,44 @@ pub const cmd = struct {
         };
     }
 
+    pub fn socket() !usize {
+        return pcb_table.socket() catch |err| {
+            util.errorf(@src(), "pcb_table.socket() failure: {t}", .{err});
+            return err;
+        };
+    }
+
     pub fn close(desc: usize) !void {
         return pcb_table.close(desc) catch |err| {
             util.errorf(@src(), "pcb_table.close() failure: {t}", .{err});
+            return err;
+        };
+    }
+
+    pub fn connect(desc: usize, remote: udp.SocketAddr) !void {
+        return pcb_table.connect(desc, remote) catch |err| {
+            util.errorf(@src(), "pcb_table.connect() failure: {t}", .{err});
+            return err;
+        };
+    }
+
+    pub fn bind(desc: usize, local: udp.SocketAddr) !void {
+        return pcb_table.bind(desc, local) catch |err| {
+            util.errorf(@src(), "pcb_table.bind() failure: {t}", .{err});
+            return err;
+        };
+    }
+
+    pub fn listen(desc: usize, backlog: usize) !void {
+        return pcb_table.listen(desc, backlog) catch |err| {
+            util.errorf(@src(), "pcb_table.close() failure: {t}", .{err});
+            return err;
+        };
+    }
+
+    pub fn accept(desc: usize) !AcceptResult {
+        return pcb_table.accept(desc) catch |err| {
+            util.errorf(@src(), "pcb_table.accept() failure: {t}", .{err});
             return err;
         };
     }

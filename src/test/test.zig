@@ -144,21 +144,25 @@ fn cleanup() !void {
 
 fn appMain(_: std.Io) !void {
     const local = try udp.SocketAddr.fromString("0.0.0.0:7");
-    const remote = try udp.SocketAddr.fromString("192.0.2.1:10007");
-    const desc = try tcp.cmd.open(local, remote, .active);
+    const desc = try tcp.cmd.socket();
+    try tcp.cmd.bind(desc, local);
+    try tcp.cmd.listen(desc, 1);
+    const r = try tcp.cmd.accept(desc);
+    util.debugf(@src(), "connection from {f}, desc={d}", .{ r.remote, r.desc });
     util.debugf(@src(), "press Ctrl+C to terminate", .{});
 
     var buf: [128]u8 = undefined;
     while (!terminate.load(.seq_cst)) {
-        const n = tcp.cmd.receive(desc, &buf) catch {
+        const n = tcp.cmd.receive(r.desc, &buf) catch {
             break;
         };
         if (n == 0) break;
 
         util.debugf(@src(), "{d} bytes data received", .{n});
         util.debugdump(buf[0..n]);
-        _ = try tcp.cmd.send(desc, buf[0..n]);
+        _ = try tcp.cmd.send(r.desc, buf[0..n]);
     }
+    try tcp.cmd.close(r.desc);
     try tcp.cmd.close(desc);
     util.debugf(@src(), "terminate", .{});
 }
