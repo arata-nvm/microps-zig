@@ -142,13 +142,22 @@ fn cleanup() !void {
     };
 }
 
-fn appMain(io: std.Io) !void {
+fn appMain(_: std.Io) !void {
     const local = try udp.SocketAddr.fromString("0.0.0.0:7");
     const remote = try udp.SocketAddr.fromString("0.0.0.0:0");
     const desc = try tcp.cmd.open(local, remote, .passive);
     util.debugf(@src(), "press Ctrl+C to terminate", .{});
+
+    var buf: [128]u8 = undefined;
     while (!terminate.load(.seq_cst)) {
-        try io.sleep(.fromSeconds(1), .awake);
+        const n = tcp.cmd.receive(desc, &buf) catch {
+            break;
+        };
+        if (n == 0) break;
+
+        util.debugf(@src(), "{d} bytes data received", .{n});
+        util.debugdump(buf[0..n]);
+        _ = try tcp.cmd.send(desc, buf[0..n]);
     }
     try tcp.cmd.close(desc);
     util.debugf(@src(), "terminate", .{});

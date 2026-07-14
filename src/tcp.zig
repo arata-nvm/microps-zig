@@ -370,8 +370,43 @@ const Pcb = struct {
         // drop segment
     }
 
-    pub fn arrivesOtherwise(self: *Pcb, seg: SegInfo, local: udp.SocketAddr, remote: udp.SocketAddr) !void {
+    pub fn arrivesOtherwise(self: *Pcb, seg: SegInfo, data: []const u8, local: udp.SocketAddr, remote: udp.SocketAddr) !void {
         // 1st check sequence number
+        var acceptable = false;
+        switch (self.state) {
+            .syn_received, .established => {
+                if (seg.len == 0) {
+                    if (self.rcv.wnd == 0) {
+                        acceptable = seg.seq == self.rcv.nxt;
+                    } else {
+                        acceptable = self.rcv.nxt <= seg.seq and seg.seq < self.rcv.nxt + self.rcv.wnd;
+                    }
+                } else {
+                    if (self.rcv.wnd == 0) {
+                        // not acceptable
+                    } else {
+                        const c1 = self.rcv.nxt <= seg.seq and seg.seq < self.rcv.nxt + self.rcv.wnd;
+                        const c2 = self.rcv.nxt <= seg.seq + seg.len - 1 and seg.seq + seg.len - 1 < self.rcv.nxt + self.rcv.wnd;
+                        acceptable = c1 or c2;
+                    }
+                }
+            },
+            else => {},
+        }
+        if (!acceptable) {
+            if (!seg.flg.rst) {
+                _ = try self.output(.{ .rst = true }, &[_]u8{});
+            }
+            return;
+        }
+        // In the following it is assumed that the segment is the idealized
+        // segment that begins at RCV.NXT and does not exceed the window.
+        // One could tailor actual segments to fit this assumption by
+        // trimming off any portions that lie outside the window (including
+        // SYN and FIN), and only processing further if the segment then
+        // begins at RCV.NXT.  Segments with higher begining sequence
+        // numbers may be held for later processing.
+
         // 2nd check the RST bit
         // 3rd check security and precedence (ignore)
         // 4th check the SYN bit
@@ -388,9 +423,52 @@ const Pcb = struct {
             },
             else => {},
         }
+        switch (self.state) {
+            .established => {
+                if (self.snd.una < seg.ack and seg.ack <= self.snd.nxt) {
+                    self.snd.una = seg.ack;
+                    // TODO: Any segments on the retransmission queue
+                    //       which are thereby entirely acknowledged are removed
+                    // ignore: Users should receive positive acknowledgments for buffers
+                    //         which have been SENT and fully acknowledged
+                    //         (i.e., SEND buffer should be returned with "ok" response)
+                    if (self.snd.wl1 < seg.seq or (self.snd.wl1 == seg.seq and self.snd.wl2 <= seg.ack)) {
+                        self.snd.wnd = seg.wnd;
+                        self.snd.wl1 = seg.seq;
+                        self.snd.wl2 = seg.ack;
+                    }
+                } else if (seg.ack < self.snd.una) {
+                    // ignore
+                } else if (self.snd.nxt < seg.ack) {
+                    _ = try self.output(.{ .ack = true }, &[_]u8{});
+                    return;
+                }
+            },
+            else => {},
+        }
 
         // 6th check the URG bit (ignore)
         // 7th process the segment text
+        switch (self.state) {
+            .established => {
+                if (data.len > 0) {
+                    if (self.rcv.nxt != seg.seq or self.rcv.wnd < data.len) {
+                        // NOTE: Request the optimal segment
+                        _ = try self.output(.{ .ack = true }, &[_]u8{});
+                        return;
+                    }
+                    util.debugf(@src(), "copy segment text, len={d}, wnd={d}", .{ data.len, self.rcv.wnd });
+                    const offset = self.buf.len - self.rcv.wnd;
+                    @memcpy(self.buf[offset .. offset + data.len], data);
+                    self.rcv.nxt = @intCast(seg.seq + data.len);
+                    self.rcv.wnd -= @intCast(data.len);
+                    _ = try self.output(.{ .ack = true }, &[_]u8{});
+                    self.task.wakeup();
+                }
+            },
+            else => {},
+        }
+
         // 8th check the FIN bit
     }
 };
@@ -515,8 +593,84 @@ const PcbTable = struct {
         pcb.release();
     }
 
+    pub fn send(self: *Self, desc: usize, data: []const u8) !usize {
+        self.lock.acquire();
+        defer self.lock.release();
+
+        const pcb = self.get(desc) orelse {
+            util.errorf(@src(), "pcb not found: desc={d}", .{desc});
+            return error.PcbNotFound;
+        };
+
+        var sent: usize = 0;
+        while (true) {
+            if (pcb.state != .established) {
+                util.errorf(@src(), "invalid state: {t}", .{pcb.state});
+                return error.PcbInvalidState;
+            }
+
+            blk: {
+                while (sent < data.len) {
+                    const cap = pcb.snd.wnd - (pcb.snd.nxt - pcb.snd.una);
+                    if (cap == 0) {
+                        pcb.task.sleep(&self.lock, null) catch {
+                            util.debugf(@src(), "interrupted", .{});
+                            if (sent == 0) {
+                                return error.Interrupted;
+                            }
+                            return sent;
+                        };
+                        break :blk; // retry
+                    }
+                    const slen = @min(pcb.mss, data.len - sent, cap);
+                    _ = pcb.output(.{ .ack = true, .psh = true }, data[sent .. sent + slen]) catch |err| {
+                        util.errorf(@src(), "pcb.output() failure: {t}", .{err});
+                        pcb.changeState(.closed);
+                        pcb.release();
+                        return error.PcbOutputFailure;
+                    };
+                    pcb.snd.nxt += slen;
+                    sent += slen;
+                }
+                return sent;
+            }
+        }
+    }
+
+    pub fn receive(self: *Self, desc: usize, buf: []u8) !usize {
+        self.lock.acquire();
+        defer self.lock.release();
+
+        const pcb = self.get(desc) orelse {
+            util.errorf(@src(), "pcb not found: desc={d}", .{desc});
+            return error.PcbNotFound;
+        };
+
+        while (true) {
+            if (pcb.state != .established) {
+                util.errorf(@src(), "invalid state: {t}", .{pcb.state});
+                return error.PcbInvalidState;
+            }
+
+            const remain = pcb.buf.len - pcb.rcv.wnd;
+            if (remain == 0) {
+                pcb.task.sleep(&self.lock, null) catch {
+                    util.debugf(@src(), "interrupted", .{});
+                    return error.Interrupted;
+                };
+                continue;
+            }
+
+            const len = @min(buf.len, remain);
+            @memcpy(buf[0..len], pcb.buf[0..len]);
+            @memmove(pcb.buf[0 .. remain - len], pcb.buf[len..remain]);
+            pcb.rcv.wnd += @intCast(len);
+            return len;
+        }
+    }
+
     // rfc793 - section 3.9 [Event Processing > SEGMENT ARRIVES]
-    pub fn segmentArrives(self: *Self, seg: SegInfo, flags: TcpFlags, _: []const u8, local: udp.SocketAddr, remote: udp.SocketAddr) !void {
+    pub fn segmentArrives(self: *Self, seg: SegInfo, flags: TcpFlags, data: []const u8, local: udp.SocketAddr, remote: udp.SocketAddr) !void {
         self.lock.acquire();
         defer self.lock.release();
 
@@ -541,7 +695,7 @@ const PcbTable = struct {
         switch (pcb.state) {
             .listen => try pcb.arrivesListen(seg, local, remote),
             .syn_sent => try pcb.arrivesSynSent(),
-            else => try pcb.arrivesOtherwise(seg, local, remote),
+            else => try pcb.arrivesOtherwise(seg, data, local, remote),
         }
     }
 };
@@ -619,6 +773,20 @@ pub const cmd = struct {
     pub fn close(desc: usize) !void {
         return pcb_table.close(desc) catch |err| {
             util.errorf(@src(), "pcb_table.close() failure: {t}", .{err});
+            return err;
+        };
+    }
+
+    pub fn send(desc: usize, data: []const u8) !usize {
+        return pcb_table.send(desc, data) catch |err| {
+            util.errorf(@src(), "pcb_table.send() failure: {t}", .{err});
+            return err;
+        };
+    }
+
+    pub fn receive(desc: usize, buf: []u8) !usize {
+        return pcb_table.receive(desc, buf) catch |err| {
+            util.errorf(@src(), "pcb_table.receive() failure: {t}", .{err});
             return err;
         };
     }
