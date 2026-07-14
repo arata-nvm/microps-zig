@@ -578,6 +578,7 @@ const Pcb = struct {
                 _ = try self.output(.{ .ack = true }, &[_]u8{});
                 // NOTE: not specified in the RFC793, but send window initialization required
                 self.snd.updateWindow(seg);
+                self.task.wakeup();
                 // ignore: continue processing at the sixth step below where the URG bit is checked
                 return;
             } else {
@@ -592,7 +593,7 @@ const Pcb = struct {
     fn arrivesOtherwise(self: *Pcb, seg: SegInfo, data: []const u8, local: udp.SocketAddr, remote: udp.SocketAddr) !void {
         // 1st check sequence number
         const acceptable = switch (self.state) {
-            .syn_received, .established => self.rcv.accepts(seg),
+            .syn_received, .established, .close_wait, .last_ack => self.rcv.accepts(seg),
             else => false,
         };
         if (!acceptable) {
@@ -626,7 +627,7 @@ const Pcb = struct {
             else => {},
         }
         switch (self.state) {
-            .established => {
+            .established, .close_wait => {
                 if (self.snd.ackAdvances(seg.ack)) {
                     self.processAck(seg);
                 } else if (seg.ack < self.snd.una) {
@@ -635,6 +636,13 @@ const Pcb = struct {
                     _ = try self.output(.{ .ack = true }, &[_]u8{});
                     return;
                 }
+            },
+            .last_ack => {
+                if (seg.ack == self.snd.nxt) {
+                    self.changeState(.closed);
+                    self.release();
+                }
+                return;
             },
             else => {},
         }
@@ -655,10 +663,34 @@ const Pcb = struct {
                     self.task.wakeup();
                 }
             },
+            .close_wait, .last_ack => {
+                // ignore segment text
+            },
             else => {},
         }
 
         // 8th check the FIN bit
+        if (seg.flg.fin) {
+            if (self.state == .closed or self.state == .listen) {
+                // drop segment
+                return;
+            }
+            self.rcv.nxt = seg.seq + 1;
+            _ = try self.output(.{ .ack = true }, &[_]u8{});
+            switch (self.state) {
+                .syn_received, .established => {
+                    self.changeState(.close_wait);
+                    self.task.wakeup();
+                },
+                .close_wait => {
+                    // Remain in the CLOSE-WAIT state
+                },
+                .last_ack => {
+                    // Remain in the LAST-ACK state
+                },
+                else => {},
+            }
+        }
     }
 };
 
@@ -787,9 +819,40 @@ const PcbTable = struct {
             return error.PcbNotFound;
         };
         util.debugf(@src(), "desc={d}", .{desc});
-        _ = try pcb.output(.{ .rst = true }, &[_]u8{});
-        pcb.changeState(.closed);
-        pcb.release();
+
+        switch (pcb.state) {
+            .closed => {
+                util.errorf(@src(), "connection does not exist", .{});
+                return error.PcbConnectionDoesNotExist;
+            },
+            .listen, .syn_sent => {
+                pcb.changeState(.closed);
+            },
+            .syn_received, .established => {
+                _ = try pcb.output(.{ .rst = true }, &[_]u8{});
+                pcb.changeState(.closed);
+            },
+            .close_wait => {
+                util.debugf(@src(), "close connection", .{});
+                _ = try pcb.output(.{ .ack = true, .fin = true }, &[_]u8{});
+                pcb.snd.nxt += 1;
+                pcb.changeState(.last_ack);
+            },
+            .last_ack => {
+                util.errorf(@src(), "connection closing", .{});
+                return error.PcbConnectionClosing;
+            },
+            else => {
+                util.errorf(@src(), "unknown state: {t}", .{pcb.state});
+                return error.PcbUnknownState;
+            },
+        }
+
+        if (pcb.state == .closed) {
+            pcb.release();
+        } else {
+            pcb.task.wakeup();
+        }
     }
 
     pub fn send(self: *Self, desc: usize, data: []const u8) !usize {
@@ -803,7 +866,12 @@ const PcbTable = struct {
 
         var sent: usize = 0;
         while (true) {
-            if (pcb.state != .established) {
+            if (pcb.state == .last_ack) {
+                util.errorf(@src(), "connection closing", .{});
+                return error.PcbConnectionClosing;
+            }
+
+            if (pcb.state != .established and pcb.state != .close_wait) {
                 util.errorf(@src(), "invalid state: {t}", .{pcb.state});
                 return error.PcbInvalidState;
             }
@@ -846,6 +914,11 @@ const PcbTable = struct {
         };
 
         while (true) {
+            if (pcb.state == .last_ack or (pcb.state == .close_wait and pcb.availableBuf() == 0)) {
+                util.debugf(@src(), "connection closing", .{});
+                return 0;
+            }
+
             if (pcb.state != .established) {
                 util.errorf(@src(), "invalid state: {t}", .{pcb.state});
                 return error.PcbInvalidState;
