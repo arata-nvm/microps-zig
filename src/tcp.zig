@@ -263,6 +263,30 @@ const State = enum {
     closing,
     last_ack,
     time_wait,
+};
+
+const StateData = union(State) {
+    const Self = @This();
+
+    none,
+    closed,
+    listen: struct {
+        backlog: util.Queue(*Pcb) = .{},
+        backlog_max: usize,
+    },
+    syn_sent,
+    syn_received: struct {
+        parent: ?*Pcb = null,
+    },
+    established,
+    fin_wait_1,
+    fin_wait_2,
+    close_wait,
+    closing,
+    last_ack,
+    time_wait: struct {
+        expires_at: std.Io.Timestamp,
+    },
 
     fn isSynchronized(self: Self) bool {
         return switch (self) {
@@ -441,7 +465,7 @@ const QueueEntry = struct {
 const timewait: std.Io.Duration = .fromSeconds(30);
 
 const Pcb = struct {
-    state: State = .none,
+    state: StateData = .none,
     mode: PcbMode = .rfc793,
     local: udp.SocketAddr = .{},
     remote: udp.SocketAddr = .{},
@@ -461,14 +485,15 @@ const Pcb = struct {
         socket,
     };
 
-    fn changeState(self: *Pcb, new_state: State) void {
+    fn changeState(self: *Pcb, new_state: StateData) void {
         util.debugf(@src(), "{t} => {t}", .{ self.state, new_state });
         self.state = new_state;
     }
 
-    fn setTimewaitTimer(self: *Pcb) void {
-        const now = platform.now();
-        self.tw_timer = now.addDuration(timewait);
+    fn changeStateToTimewait(self: *Pcb) void {
+        self.changeState(.{ .time_wait = .{
+            .expires_at = platform.now().addDuration(timewait),
+        } });
         util.debugf(@src(), "start time_wait timer: {d} seconds", .{timewait.toSeconds()});
     }
 
@@ -639,6 +664,7 @@ const Pcb = struct {
         if (seg.flg.syn) {
             // ignore: security/compartment check
             var pcb = self;
+            var parent: ?*Pcb = null;
             if (self.mode == .socket) {
                 if (self.backlog_max < self.backlog.num) {
                     util.warnf(@src(), "backlog is full", .{});
@@ -650,7 +676,7 @@ const Pcb = struct {
                 };
                 const new_pcb = &pcb_table.pcbs[new_desc];
                 util.debugf(@src(), "allocate PCB for new connection, desc={d}, state={t}", .{ new_desc, new_pcb.state });
-                new_pcb.parent = self;
+                parent = self;
                 pcb = new_pcb;
             }
 
@@ -660,7 +686,7 @@ const Pcb = struct {
             pcb.rcv.acceptSyn(seg.seq);
             pcb.snd = .init(platform.random32());
             _ = try pcb.output(.{ .syn = true, .ack = true }, &[_]u8{});
-            pcb.changeState(.syn_received);
+            pcb.changeState(.{ .syn_received = .{ .parent = parent } });
             // ignore: Note that any other incoming control or data (combined with SYN)
             // will be processed in the SYN-RECEIVED state, but processing of SYN and ACK
             // should not be repeated.
@@ -711,7 +737,7 @@ const Pcb = struct {
                 return;
             } else {
                 // simultaneous open
-                self.changeState(.syn_received);
+                self.changeState(.{ .syn_received = .{} });
                 _ = try self.output(.{ .syn = true, .ack = true }, &[_]u8{});
                 // ignore: If there are other controls or text in the segment,
                 //         queue them for processing after the ESTABLISHED state has been reached
@@ -818,9 +844,8 @@ const Pcb = struct {
                     },
                     .closing => {
                         if (seg.ack == self.snd.nxt) {
-                            self.changeState(.time_wait);
+                            self.changeStateToTimewait();
                             // NOTE: set 2MSL timer, although it is not explicitly stated in the RFC
-                            self.setTimewaitTimer();
                             self.task.wakeup();
                         }
                     },
@@ -835,7 +860,7 @@ const Pcb = struct {
             },
             .time_wait => {
                 if (seg.flg.fin) {
-                    self.setTimewaitTimer();
+                    self.changeStateToTimewait();
                 }
             },
             else => {},
@@ -870,15 +895,13 @@ const Pcb = struct {
                 },
                 .fin_wait_1 => {
                     if (seg.ack == self.snd.nxt) {
-                        self.changeState(.time_wait);
-                        self.setTimewaitTimer();
+                        self.changeStateToTimewait();
                     } else {
                         self.changeState(.closing);
                     }
                 },
                 .fin_wait_2 => {
-                    self.changeState(.time_wait);
-                    self.setTimewaitTimer();
+                    self.changeStateToTimewait();
                 },
                 .close_wait => {
                     // Remain in the CLOSE-WAIT state
@@ -1134,8 +1157,9 @@ const PcbTable = struct {
             util.errorf(@src(), "pcb is not CLOSED state", .{});
             return error.NotClosedState;
         }
-        pcb.backlog_max = backlog;
-        pcb.changeState(.listen);
+        pcb.changeState(.{ .listen = .{
+            .backlog_max = backlog,
+        } });
     }
 
     pub fn accept(self: *Self, desc: usize) !AcceptResult {
