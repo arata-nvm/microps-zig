@@ -278,7 +278,7 @@ pub fn registerIface(dev: *device.Device, iface: *IpIface) !void {
     try dev.addIface(&iface.iface);
 
     const network = iface.unicast.masked(iface.netmask);
-    route.add(network, iface.netmask, IpAddr.any, iface) catch |err| {
+    route.add(network, iface.netmask, .any, iface) catch |err| {
         util.errorf(@src(), "route.add() failure: {t}", .{err});
         return err;
     };
@@ -315,7 +315,7 @@ fn input(data: []const u8, dev: *device.Device) !void {
     const iface = dev.getIface(IpIface) orelse return;
     const dst = hdr.dst;
     if (!dst.eql(iface.unicast)) {
-        if (!dst.eql(iface.broadcast) and !dst.eql(IpAddr.broadcast)) {
+        if (!dst.eql(iface.broadcast) and !dst.eql(.broadcast)) {
             // ignore: for other host
             return;
         }
@@ -337,7 +337,7 @@ fn input(data: []const u8, dev: *device.Device) !void {
 
 pub fn output(protocol: IpProtocolType, data: []const u8, src: IpAddr, dst: IpAddr) !usize {
     util.debugf(@src(), "{f} => {f}, protocol={d}, len={d}", .{ src, dst, protocol, data.len });
-    if (src.eql(IpAddr.any) and dst.eql(IpAddr.broadcast)) {
+    if (src.eql(.any) and dst.eql(.broadcast)) {
         util.errorf(@src(), "source address is required for broadcast addresses", .{});
         return error.IpRoutingNotImplemented;
     }
@@ -346,7 +346,7 @@ pub fn output(protocol: IpProtocolType, data: []const u8, src: IpAddr, dst: IpAd
         return error.IpRouteNotFound;
     };
     const iface = r.iface;
-    if (!src.eql(IpAddr.any) and !src.eql(iface.unicast)) {
+    if (!src.eql(.any) and !src.eql(iface.unicast)) {
         util.errorf(@src(), "unable to output with specified source address, src={f}", .{src});
         return error.IpSourceAddressNotAvailable;
     }
@@ -361,7 +361,7 @@ pub fn output(protocol: IpProtocolType, data: []const u8, src: IpAddr, dst: IpAd
         util.errorf(@src(), "buildPacket() failure: {t}", .{err});
         return err;
     };
-    const next = if (!r.nexthop.eql(IpAddr.any)) r.nexthop else dst;
+    const next = if (!r.nexthop.eql(.any)) r.nexthop else dst;
     outputDevice(iface, packet, next) catch |err| {
         util.errorf(@src(), "outputDevice() failure: {t}", .{err});
         return err;
@@ -382,7 +382,7 @@ fn outputDevice(iface: *IpIface, data: []const u8, target: IpAddr) !void {
     util.debugf(@src(), "dev={s}, len={d}, target={f}", .{ iface.dev().name(), data.len, target });
     var hwaddr: [device.Device.addr_len]u8 = undefined;
     if (iface.dev().flags.need_arp) {
-        if (target.eql(iface.broadcast) or target.eql(IpAddr.broadcast)) {
+        if (target.eql(iface.broadcast) or target.eql(.broadcast)) {
             hwaddr = iface.dev().broadcast;
         } else {
             const ha = arp.resolve(iface, target) catch |err| switch (err) {
@@ -432,7 +432,7 @@ pub const route = struct {
 
     // NOTE: must not be called after run()
     pub fn setDefaultGateway(iface: *IpIface, gateway: IpAddr) !void {
-        add(IpAddr.any, IpAddr.any, gateway, iface) catch |err| {
+        add(.any, .any, gateway, iface) catch |err| {
             util.errorf(@src(), "routeSetDefaultGateway() failure: {t}", .{err});
             return err;
         };
@@ -445,7 +445,7 @@ pub const route = struct {
 
     // NOTE: must not be called after run()
     fn add(network: IpAddr, netmask: IpAddr, nexthop: IpAddr, iface: *IpIface) !void {
-        if (!nexthop.eql(IpAddr.any)) {
+        if (!nexthop.eql(.any)) {
             util.infof(@src(), "{f}/{f} via {f} dev {s} src {f}", .{
                 network,
                 netmask,

@@ -838,13 +838,13 @@ const PcbTable = struct {
             if (pcb.local.port != local.port) {
                 continue;
             }
-            if (!(pcb.local.addr.eql(local.addr) or pcb.local.addr.eql(ip.IpAddr.any)) and local.addr.eql(ip.IpAddr.any)) {
+            if (!(pcb.local.addr.eql(local.addr) or pcb.local.addr.eql(.any)) and local.addr.eql(ip.IpAddr.any)) {
                 continue;
             }
 
             const remote_matched = pcb.remote.addr.eql(remote.addr) and pcb.remote.port == remote.port;
-            const pcb_remote_unspecified = pcb.remote.addr.eql(ip.IpAddr.any) and pcb.remote.port == udp.Port.unspecified;
-            const key_remote_unspecified = remote.addr.eql(ip.IpAddr.any) and remote.port == udp.Port.unspecified;
+            const pcb_remote_unspecified = pcb.remote.addr.eql(.any) and pcb.remote.port == udp.Port.unspecified;
+            const key_remote_unspecified = remote.addr.eql(.any) and remote.port == udp.Port.unspecified;
             if (!remote_matched and !pcb_remote_unspecified and !key_remote_unspecified) {
                 continue;
             }
@@ -1113,14 +1113,14 @@ const PcbTable = struct {
 
     fn resolveLocal(self: *Self, local: udp.SocketAddr, remote: udp.SocketAddr) !udp.SocketAddr {
         var resolved = local;
-        if (local.addr.eql(ip.IpAddr.any)) {
+        if (local.addr.eql(.any)) {
             const iface = ip.route.getIface(remote.addr) orelse {
                 util.errorf(@src(), "iface not found that can reach foreign address, addr={f}", .{remote.addr});
                 return error.PcbNoRoute;
             };
             resolved.addr = iface.unicast;
         }
-        if (local.port == udp.Port.unspecified) {
+        if (local.port == .unspecified) {
             resolved.port = try self.allocPort(local, remote);
         }
         return resolved;
@@ -1160,8 +1160,8 @@ pub fn init() !void {
 fn input(ipd: *const ip.IpHdr.Decoded, data: []const u8, iface: *ip.IpIface) !void {
     const tcpd = try TcpHdr.decode(data, &ipd.hdr);
 
-    const src_is_broadcast = tcpd.hdr.src.addr.eql(ip.IpAddr.broadcast) or tcpd.hdr.src.addr.eql(iface.broadcast);
-    const dst_is_broadcast = tcpd.hdr.dst.addr.eql(ip.IpAddr.broadcast) or tcpd.hdr.dst.addr.eql(iface.broadcast);
+    const src_is_broadcast = tcpd.hdr.src.addr.eql(.broadcast) or tcpd.hdr.src.addr.eql(iface.broadcast);
+    const dst_is_broadcast = tcpd.hdr.dst.addr.eql(.broadcast) or tcpd.hdr.dst.addr.eql(iface.broadcast);
     if (src_is_broadcast or dst_is_broadcast) {
         util.errorf(@src(), "only supports unicast, src={f}, dst={f}", .{ tcpd.hdr.src, tcpd.hdr.dst });
         return error.TcpUnicastOnly;

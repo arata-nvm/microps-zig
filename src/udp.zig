@@ -21,8 +21,10 @@ pub const Port = enum(u16) {
 pub const SocketAddr = struct {
     const Self = @This();
 
-    addr: ip.IpAddr = ip.IpAddr.any,
-    port: Port = Port.unspecified,
+    pub const any: Self = .{};
+
+    addr: ip.IpAddr = .any,
+    port: Port = .unspecified,
 
     pub fn fromString(s: []const u8) !Self {
         const i = std.mem.indexOfScalar(u8, s, ':') orelse return error.InvalidAddress;
@@ -168,7 +170,7 @@ const PcbTable = struct {
     const Pcb = struct {
         desc: usize = 0,
         state: enum { free, open, closing } = .free,
-        local: SocketAddr = .{ .addr = ip.IpAddr.any, .port = .unspecified },
+        local: SocketAddr = .{ .addr = .any, .port = .unspecified },
         queue: util.Queue(QueueEntry) = .{},
         task: sched.Task = .{},
     };
@@ -192,7 +194,7 @@ const PcbTable = struct {
             if (pcb.local.port != key.port) {
                 continue;
             }
-            if (pcb.local.addr.eql(key.addr) or pcb.local.addr.eql(ip.IpAddr.any) or key.addr.eql(ip.IpAddr.any)) {
+            if (pcb.local.addr.eql(key.addr) or pcb.local.addr.eql(.any) or key.addr.eql(.any)) {
                 return desc;
             }
         }
@@ -213,7 +215,7 @@ const PcbTable = struct {
 
         pcb.desc = 0;
         pcb.state = .free;
-        pcb.local = .{ .addr = ip.IpAddr.any, .port = .unspecified };
+        pcb.local = .{ .addr = .any, .port = .unspecified };
 
         const allocator = platform.allocator();
         while (pcb.queue.pop()) |entry| {
@@ -320,14 +322,14 @@ const PcbTable = struct {
 
     fn resolveLocal(self: *Self, pcb: *Pcb, remote: SocketAddr) !SocketAddr {
         var local = pcb.local;
-        if (local.addr.eql(ip.IpAddr.any)) {
+        if (local.addr.eql(.any)) {
             const iface = ip.route.getIface(remote.addr) orelse {
                 util.errorf(@src(), "iface not found that can reach foreign address, addr={f}", .{remote.addr});
                 return error.PcbNoRoute;
             };
             local.addr = iface.unicast;
         }
-        if (local.port == Port.unspecified) {
+        if (local.port == .unspecified) {
             local.port = try self.allocPort(local.addr);
             pcb.local.port = local.port; // save dynamic source port
         }

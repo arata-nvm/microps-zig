@@ -209,7 +209,7 @@ fn input(dev: *device.Device, frame: []const u8) !void {
     const dst = d.hdr.dst;
     const addr = ether.EtherAddr.fromBytes(dev.addr[0..ether.EtherAddr.len]);
     if (!dst.eql(addr)) {
-        if (!dst.eql(ether.EtherAddr.broadcast)) {
+        if (!dst.eql(.broadcast)) {
             // for other host
             return;
         }
