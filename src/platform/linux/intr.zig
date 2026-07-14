@@ -148,7 +148,7 @@ test "raise and dispatch" {
         }
     };
 
-    try platform.init(.{ .io = std.testing.io });
+    try platform.init(.{});
     try register(irqBase(), Context.isr, .{}, null);
     try run();
     try raise(irqBase());

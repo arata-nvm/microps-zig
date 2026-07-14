@@ -96,7 +96,7 @@ test "periodic timer" {
         }
     };
 
-    try platform.init(.{ .io = std.testing.io });
+    try platform.init(.{});
     try register(.fromMicroseconds(10), Context.handler);
     try intr.run();
     try run();
