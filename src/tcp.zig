@@ -249,6 +249,8 @@ pub const Mode = enum {
 };
 
 const State = enum {
+    const Self = @This();
+
     none,
     closed,
     listen,
@@ -261,6 +263,31 @@ const State = enum {
     closing,
     last_ack,
     time_wait,
+
+    fn isSynchronized(self: Self) bool {
+        return switch (self) {
+            .syn_received,
+            .established,
+            .fin_wait_1,
+            .fin_wait_2,
+            .close_wait,
+            .closing,
+            .last_ack,
+            .time_wait,
+            => true,
+            else => false,
+        };
+    }
+
+    fn canReceiveData(self: Self) bool {
+        return switch (self) {
+            .established,
+            .fin_wait_1,
+            .fin_wait_2,
+            => true,
+            else => false,
+        };
+    }
 };
 
 const SndVars = struct {
@@ -698,10 +725,7 @@ const Pcb = struct {
 
     fn arrivesOtherwise(self: *Pcb, seg: SegInfo, data: []const u8, local: udp.SocketAddr, remote: udp.SocketAddr) !void {
         // 1st check sequence number
-        const acceptable = switch (self.state) {
-            .syn_received, .established, .fin_wait_1, .fin_wait_2, .close_wait, .closing, .last_ack, .time_wait => self.rcv.accepts(seg),
-            else => false,
-        };
+        const acceptable = self.state.isSynchronized() and self.rcv.accepts(seg);
         if (!acceptable) {
             if (!seg.flg.rst) {
                 _ = try self.output(.{ .ack = true }, &[_]u8{});
@@ -742,16 +766,11 @@ const Pcb = struct {
 
         // 3rd check security and precedence (ignore)
         // 4th check the SYN bit
-        switch (self.state) {
-            .syn_received, .established, .fin_wait_1, .fin_wait_2, .close_wait, .closing, .last_ack, .time_wait => {
-                if (seg.flg.syn) {
-                    _ = try self.output(.{ .rst = true }, &[_]u8{});
-                    util.errorf(@src(), "connection reset", .{});
-                    self.drop();
-                    return;
-                }
-            },
-            else => {},
+        if (self.state.isSynchronized() and seg.flg.syn) {
+            _ = try self.output(.{ .rst = true }, &[_]u8{});
+            util.errorf(@src(), "connection reset", .{});
+            self.drop();
+            return;
         }
 
         // 5th check the ACK field
@@ -824,24 +843,16 @@ const Pcb = struct {
 
         // 6th check the URG bit (ignore)
         // 7th process the segment text
-        switch (self.state) {
-            .established, .fin_wait_1, .fin_wait_2 => {
-                if (data.len > 0) {
-                    if (self.rcv.nxt != seg.seq or self.rcv.wnd < data.len) {
-                        // NOTE: Request the optimal segment
-                        _ = try self.output(.{ .ack = true }, &[_]u8{});
-                        return;
-                    }
-                    util.debugf(@src(), "copy segment text, len={d}, wnd={d}", .{ data.len, self.rcv.wnd });
-                    self.storeBuf(seg, data);
-                    _ = try self.output(.{ .ack = true }, &[_]u8{});
-                    self.task.wakeup();
-                }
-            },
-            .close_wait, .closing, .last_ack, .time_wait => {
-                // ignore segment text
-            },
-            else => {},
+        if (self.state.canReceiveData() and data.len > 0) {
+            if (self.rcv.nxt != seg.seq or self.rcv.wnd < data.len) {
+                // NOTE: Request the optimal segment
+                _ = try self.output(.{ .ack = true }, &[_]u8{});
+                return;
+            }
+            util.debugf(@src(), "copy segment text, len={d}, wnd={d}", .{ data.len, self.rcv.wnd });
+            self.storeBuf(seg, data);
+            _ = try self.output(.{ .ack = true }, &[_]u8{});
+            self.task.wakeup();
         }
 
         // 8th check the FIN bit
