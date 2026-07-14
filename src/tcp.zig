@@ -1056,7 +1056,7 @@ const PcbTable = struct {
         util.debugf(@src(), "local={f}, remote={f}", .{ pcb.local, remote });
 
         const resolved_local = try self.resolveLocal(pcb.local, remote);
-        if (self.select(resolved_local, remote)) {
+        if (self.select(resolved_local, remote)) |_| {
             util.errorf(@src(), "address already in use", .{});
             return error.TcpAlreadyInUse;
         }

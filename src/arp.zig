@@ -355,7 +355,7 @@ pub fn resolve(iface: *ip.IpIface, pa: ip.IpAddr) !ether.EtherAddr {
     switch (cache.resolve(pa, now)) {
         .miss, .waiting => {
             request(iface, pa) catch |err| {
-                util.errorf(@src(), "request() failure: {t}", err);
+                util.errorf(@src(), "request() failure: {t}", .{err});
             };
             return error.ArpResolveWaiting;
         },

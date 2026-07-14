@@ -37,8 +37,16 @@ pub const IpAddr = struct {
     pub const any = IpAddr{ .addr = 0x00000000 };
     pub const broadcast = IpAddr{ .addr = 0xffffffff };
 
-    pub fn fromBytes(bytes: *const [len]u8) IpAddr {
-        return IpAddr{ .addr = std.mem.readInt(u32, bytes, .big) };
+    pub fn fromU32(addr: u32) Self {
+        return .{ .addr = addr };
+    }
+
+    pub fn toU32(self: Self) u32 {
+        return self.addr;
+    }
+
+    pub fn fromBytes(bytes: *const [len]u8) Self {
+        return .{ .addr = std.mem.readInt(u32, bytes, .big) };
     }
 
     pub fn toBytes(self: Self) [len]u8 {

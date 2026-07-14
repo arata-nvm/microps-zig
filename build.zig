@@ -24,6 +24,27 @@ pub fn build(b: *std.Build) void {
 
     microps_mod.addImport("build_options", options_mod);
 
+    // sock module
+
+    const sock_mod = b.createModule(.{
+        .root_source_file = b.path("src/c/sock.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true, // pthread, clock_gettime
+        .imports = &.{
+            .{ .name = "microps", .module = microps_mod },
+        },
+    });
+
+    sock_mod.addImport("build_options", options_mod);
+    sock_mod.addIncludePath(b.path("include"));
+
+    const sock_lib = b.addLibrary(.{
+        .linkage = .static,
+        .name = "sock",
+        .root_module = sock_mod,
+    });
+
     // test application
 
     const test_mod = b.createModule(.{
@@ -53,6 +74,7 @@ pub fn build(b: *std.Build) void {
 
     const check_step = b.step("check", "Check if test compiles");
     check_step.dependOn(&test_exe.step);
+    check_step.dependOn(&sock_lib.step);
 
     // tap application
 
