@@ -14,7 +14,7 @@ const intr = platform.intr;
 // TODO: etherの具体的な実装に依存してしまっているので、分離できると好ましい
 pub const ProtocolType = @import("ether.zig").EtherType;
 
-pub const ProtocolHandler = *const fn (data: []const u8, dev: *device.Device) anyerror!void;
+pub const ProtocolHandler = *const fn (data: []const u8, dev: *device.Device) void;
 
 pub const Protocol = struct {
     const Self = @This();
@@ -95,12 +95,12 @@ pub fn input(typ: ProtocolType, data: []const u8, dev: *device.Device) !void {
     // allow unsupported protocols
 }
 
-pub fn sortirqHandler(_: u32) !void {
+pub fn sortirqHandler(_: u32) void {
     const allocator = platform.allocator();
     for (protocols.items) |*proto| {
         while (proto.queuePop()) |entry| {
             defer allocator.free(entry.data);
-            try proto.handler(entry.data, entry.dev);
+            proto.handler(entry.data, entry.dev);
         }
     }
 }
@@ -142,7 +142,9 @@ pub fn run() !void {
         return err;
     };
     for (device.getAll()) |dev| {
-        try dev.open();
+        dev.open() catch |err| {
+            util.errorf(@src(), "dev.open() failure: {t}", .{err});
+        };
     }
     util.infof(@src(), "success", .{});
 }
@@ -154,7 +156,9 @@ pub fn shutdown() !void {
         return err;
     };
     for (device.getAll()) |dev| {
-        try dev.close();
+        dev.close() catch |err| {
+            util.errorf(@src(), "dev.close() failure: {t}", .{err});
+        };
     }
     util.infof(@src(), "success", .{});
 }

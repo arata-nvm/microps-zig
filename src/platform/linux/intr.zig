@@ -11,7 +11,7 @@ pub fn irqBase() u32 {
     return @as(u32, std.c.sigrtmin()) + 1;
 }
 
-pub const Isr = *const fn (irq: u32, arg: ?*anyopaque) anyerror!void;
+pub const Isr = *const fn (irq: u32, arg: ?*anyopaque) void;
 
 pub const IrqFlags = struct {
     shared: bool = false,
@@ -31,20 +31,20 @@ var thread: ?std.Thread = null;
 var barrier: std.c.sem_t = undefined;
 var sigmask: std.c.sigset_t = undefined;
 
-pub fn registerNoarg(irq: u32, isr: fn (u32) anyerror!void, flags: IrqFlags) !void {
+pub fn registerNoarg(irq: u32, isr: fn (u32) void, flags: IrqFlags) !void {
     const Shim = struct {
-        fn call(i: u32, arg: ?*anyopaque) !void {
+        fn call(i: u32, arg: ?*anyopaque) void {
             _ = arg;
-            try isr(i);
+            isr(i);
         }
     };
     return register(irq, Shim.call, flags, null);
 }
 
-pub fn registerTyped(comptime Ctx: type, irq: u32, comptime isr: fn (u32, *Ctx) anyerror!void, flags: IrqFlags, ctx: *Ctx) !void {
+pub fn registerTyped(comptime Ctx: type, irq: u32, comptime isr: fn (u32, *Ctx) void, flags: IrqFlags, ctx: *Ctx) !void {
     const Shim = struct {
-        fn call(i: u32, arg: ?*anyopaque) !void {
-            try isr(i, @ptrCast(@alignCast(arg.?)));
+        fn call(i: u32, arg: ?*anyopaque) void {
+            isr(i, @ptrCast(@alignCast(arg.?)));
         }
     };
     return register(irq, Shim.call, flags, ctx);
@@ -99,9 +99,7 @@ fn intrMain() void {
         }
         for (irqs.items) |e| {
             if (e.irq == irq) {
-                e.isr(e.irq, e.arg) catch |err2| {
-                    util.errorf(@src(), "ISR failure, irq={d}, err={t}", .{ irq, err2 });
-                };
+                e.isr(e.irq, e.arg);
                 if (!e.flags.shared) {
                     break;
                 }
@@ -143,7 +141,7 @@ test "raise and dispatch" {
     const Context = struct {
         var called = std.atomic.Value(bool).init(false);
 
-        fn isr(irq: u32, arg: ?*anyopaque) !void {
+        fn isr(irq: u32, arg: ?*anyopaque) void {
             _ = irq;
             _ = arg;
             called.store(true, .seq_cst);

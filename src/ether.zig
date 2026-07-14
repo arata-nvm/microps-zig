@@ -59,6 +59,7 @@ pub const EtherType = enum(u16) {
     ip = 0x0800,
     arp = 0x0806,
     ipv6 = 0x86dd,
+    _,
 };
 
 pub const EtherHdr = struct {
@@ -84,10 +85,7 @@ pub const EtherHdr = struct {
             .hdr = .{
                 .src = src,
                 .dst = dst,
-                .type = std.enums.fromInt(EtherType, type_int) orelse {
-                    util.errorf(@src(), "unknown type: {d}", .{type_int});
-                    return error.EtherUnknownType;
-                },
+                .type = @enumFromInt(type_int),
             },
             .payload = r.buffered(),
         };
@@ -105,6 +103,6 @@ pub const EtherHdr = struct {
     ) !void {
         try writer.print("        src: {f}\n", .{self.src});
         try writer.print("        dst: {f}\n", .{self.dst});
-        try writer.print("       type: 0x{x:0>4} ({t})\n", .{ self.type, self.type });
+        try writer.print("       type: 0x{x:0>4} ({s})\n", .{ self.type, std.enums.tagName(EtherType, self.type) orelse "unknown" });
     }
 };

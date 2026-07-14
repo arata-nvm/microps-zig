@@ -20,6 +20,7 @@ const ArpPro = enum(u16) {
 const ArpOp = enum(u16) {
     request = 1,
     reply = 2,
+    _,
 };
 
 const ArpHdr = struct {
@@ -50,10 +51,7 @@ const ArpHdr = struct {
             },
             .hln = hln,
             .pln = pln,
-            .op = std.enums.fromInt(ArpOp, op) orelse {
-                util.errorf(@src(), "unknown arp op: {d}", .{op});
-                return error.ArpUnknownOp;
-            },
+            .op = @enumFromInt(op),
         };
         if (self.hrd != .ether or self.hln != ether.EtherAddr.len) {
             util.errorf(@src(), "unsupported hardware address", .{});
@@ -82,7 +80,7 @@ const ArpHdr = struct {
         try writer.print("        pro: 0x{x:0>4} ({t})\n", .{ @intFromEnum(self.pro), self.pro });
         try writer.print("        hln: {d}\n", .{self.hln});
         try writer.print("        pln: {d}\n", .{self.pln});
-        try writer.print("         op: {d} ({t})\n", .{ @intFromEnum(self.op), self.op });
+        try writer.print("         op: {d} ({s})\n", .{ @intFromEnum(self.op), std.enums.tagName(ArpOp, self.op) orelse "unknown" });
     }
 };
 
@@ -174,7 +172,6 @@ const ArpCache = struct {
         self.lock.acquire();
         defer self.lock.release();
 
-        std.debug.assert(self.findSlot(pa) == null);
         const entry = self.allocSlot();
         entry.* = .{
             .pa = pa,
@@ -287,8 +284,11 @@ pub fn init() !void {
     };
 }
 
-fn input(data: []const u8, dev: *device.Device) !void {
-    const msg = try ArpEtherIp.decode(data);
+fn input(data: []const u8, dev: *device.Device) void {
+    const msg = ArpEtherIp.decode(data) catch |err| {
+        util.errorf(@src(), "ArpEtherIp.decde() failure: {t}", .{err});
+        return;
+    };
     util.debugf(@src(), "dev={s}, len={d}", .{ dev.name(), data.len });
     util.dumpf("{f}", .{msg});
     util.debugdump(data);
@@ -301,7 +301,10 @@ fn input(data: []const u8, dev: *device.Device) !void {
             cache.insert(msg.spa, msg.sha, now);
         }
         if (msg.hdr.op == .request) {
-            try reply(iface, msg.sha, msg.spa, msg.sha);
+            reply(iface, msg.sha, msg.spa, msg.sha) catch |err| {
+                util.errorf(@src(), "reply() failure: {t}", .{err});
+                return;
+            };
         }
     }
 }
@@ -351,7 +354,9 @@ pub fn resolve(iface: *ip.IpIface, pa: ip.IpAddr) !ether.EtherAddr {
     const now = platform.now();
     switch (cache.resolve(pa, now)) {
         .miss, .waiting => {
-            try request(iface, pa);
+            request(iface, pa) catch |err| {
+                util.errorf(@src(), "request() failure: {t}", err);
+            };
             return error.ArpResolveWaiting;
         },
         .resolved => |ha| {

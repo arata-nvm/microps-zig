@@ -6,8 +6,8 @@ const platform = @import("platform.zig");
 
 pub const DeviceType = enum(u16) {
     dummy = 0,
-    ethernet = 1,
-    loopback = 2,
+    loopback = 1,
+    ethernet = 2,
 };
 
 pub const DeviceFlags = packed struct(u16) {
@@ -63,32 +63,27 @@ pub const Device = struct {
     pub const ifname_size = 16;
     pub const addr_len = 16;
 
-    index: usize,
-    name_buf: [ifname_size]u8,
-    name_len: usize,
+    index: usize = 0,
+    name_buf: [ifname_size]u8 = @splat(0),
+    name_len: usize = 0,
     type: DeviceType,
     mtu: u16,
     flags: DeviceFlags,
     hlen: u16,
     alen: u16,
-    addr: [addr_len]u8,
-    broadcast: [addr_len]u8,
+    addr: [addr_len]u8 = @splat(0),
+    broadcast: [addr_len]u8 = @splat(0),
 
     ops: DeviceOps,
     ifaces: std.ArrayList(*Iface) = .empty,
 
     pub fn init(typ: DeviceType, mtu: u16, flags: DeviceFlags, hlen: u16, alen: u16, ops: DeviceOps) Self {
         return Self{
-            .index = 0,
-            .name_buf = @splat(0),
-            .name_len = 0,
             .type = typ,
             .mtu = mtu,
             .flags = flags,
             .hlen = hlen,
             .alen = alen,
-            .addr = undefined,
-            .broadcast = undefined,
             .ops = ops,
         };
     }

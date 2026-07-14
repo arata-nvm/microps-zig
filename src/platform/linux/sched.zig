@@ -55,23 +55,26 @@ pub const Task = struct {
             return error.Interrupted;
         }
 
-        self.wc += 1;
-        try sleeping_tasks.add(self);
         var timed_out = false;
-        if (timeout) |d| {
-            var ts: std.c.timespec = undefined;
-            _ = std.c.clock_gettime(.REALTIME, &ts);
-            const total = ts.sec * std.time.ns_per_s + ts.nsec + d.toNanoseconds();
-            const abs: std.c.timespec = .{
-                .sec = @intCast(@divTrunc(total, std.time.ns_per_s)),
-                .nsec = @intCast(@mod(total, std.time.ns_per_s)),
-            };
-            timed_out = std.c.pthread_cond_timedwait(&self.cond, &mutex.inner, &abs) == .TIMEDOUT;
-        } else {
-            _ = std.c.pthread_cond_wait(&self.cond, &mutex.inner);
+        {
+            self.wc += 1;
+            defer self.wc -= 1;
+
+            try sleeping_tasks.add(self);
+            if (timeout) |d| {
+                var ts: std.c.timespec = undefined;
+                _ = std.c.clock_gettime(.REALTIME, &ts);
+                const total = ts.sec * std.time.ns_per_s + ts.nsec + d.toNanoseconds();
+                const abs: std.c.timespec = .{
+                    .sec = @intCast(@divTrunc(total, std.time.ns_per_s)),
+                    .nsec = @intCast(@mod(total, std.time.ns_per_s)),
+                };
+                timed_out = std.c.pthread_cond_timedwait(&self.cond, &mutex.inner, &abs) == .TIMEDOUT;
+            } else {
+                _ = std.c.pthread_cond_wait(&self.cond, &mutex.inner);
+            }
+            try sleeping_tasks.delete(self);
         }
-        try sleeping_tasks.delete(self);
-        self.wc -= 1;
 
         if (self.interrupted) {
             if (self.wc == 0) {
@@ -92,7 +95,7 @@ pub const Task = struct {
     }
 };
 
-fn irqHandler(_: u32) !void {
+fn irqHandler(_: u32) void {
     sleeping_tasks.interrupt();
 }
 

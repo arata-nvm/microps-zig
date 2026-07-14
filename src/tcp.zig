@@ -81,6 +81,11 @@ const TcpHdr = struct {
         payload: []const u8,
     };
 
+    pub fn deinit(self: *Self) void {
+        const allocator = platform.allocator();
+        self.opts.deinit(allocator);
+    }
+
     pub fn decode(data: []const u8, ip_hdr: *const ip.IpHdr) !Decoded {
         var r: std.Io.Reader = .fixed(data);
         var hdr: TcpHdr = .{
@@ -152,6 +157,9 @@ const TcpHdr = struct {
                 },
                 else => |kind| blk: {
                     const len = try r.takeInt(u8, .big);
+                    if (len < 2) {
+                        return error.TcpInvalidLen;
+                    }
                     _ = try r.take(len - 2);
                     break :blk .{ .unknown = .{ .kind = kind, .len = len } };
                 },
@@ -170,6 +178,9 @@ const TcpHdr = struct {
             return error.TcpChecksumError;
         }
 
+        if (hdr.hlen() > data.len) {
+            return error.TcpInvalidLen;
+        }
         return .{
             .hdr = hdr,
             .payload = data[hdr.hlen()..],
@@ -281,7 +292,7 @@ const SndVars = struct {
     }
 
     fn shouldUpdateWindow(self: Self, seg: SegInfo) bool {
-        return self.wl1 < seg.seq or (self.wl1 == seg.seq and self.wl2 <= seg.seq);
+        return self.wl1 < seg.seq or (self.wl1 == seg.seq and self.wl2 <= seg.ack);
     }
 
     fn updateWindow(self: *Self, seg: SegInfo) void {
@@ -291,11 +302,11 @@ const SndVars = struct {
     }
 
     fn inFlight(self: Self) u32 {
-        return self.nxt - self.una;
+        return self.nxt -% self.una;
     }
 
     fn usableWindow(self: Self) u32 {
-        return self.wnd - self.inFlight();
+        return self.wnd -% self.inFlight();
     }
 };
 
@@ -310,7 +321,7 @@ const RcvVars = struct {
     up: u16 = 0,
 
     fn inWindow(self: Self, seq: u32) bool {
-        return self.nxt <= seq and seq < self.nxt + self.wnd;
+        return self.nxt <= seq and seq < self.nxt +% self.wnd;
     }
 
     fn accepts(self: Self, seg: SegInfo) bool {
@@ -324,7 +335,7 @@ const RcvVars = struct {
             if (self.wnd == 0) {
                 return false;
             } else {
-                return self.inWindow(seg.seq) and self.inWindow(seg.seq + seg.len - 1);
+                return self.inWindow(seg.seq) or self.inWindow(seg.seq +% seg.len -% 1);
             }
         }
     }
@@ -353,7 +364,7 @@ const SegInfo = struct {
     }
 };
 
-const retrans_timeout: std.Io.Duration = .fromMilliseconds(20);
+const retrans_timeout: std.Io.Duration = .fromMilliseconds(200);
 const retrans_deadline: std.Io.Duration = .fromSeconds(12);
 
 const QueueEntry = struct {
@@ -368,7 +379,7 @@ const QueueEntry = struct {
     data: []const u8,
 
     fn fullyAckedBy(self: Self, una: u32) bool {
-        return self.seq + self.len <= una;
+        return self.seq +% self.len <= una;
     }
 
     fn deadlineExceeded(self: Self, now: std.Io.Timestamp) bool {
@@ -391,7 +402,7 @@ const timewait: std.Io.Duration = .fromSeconds(30);
 
 const Pcb = struct {
     state: State = .none,
-    mode: PcbMode = .socket,
+    mode: PcbMode = .rfc793,
     local: udp.SocketAddr = .{},
     remote: udp.SocketAddr = .{},
     snd: SndVars = .{},
@@ -410,6 +421,7 @@ const Pcb = struct {
     backlog_max: usize = 0,
 
     const PcbMode = enum {
+        rfc793,
         socket,
     };
 
@@ -442,7 +454,7 @@ const Pcb = struct {
     fn storeBuf(self: *Pcb, seg: SegInfo, data: []const u8) void {
         const offset = self.buf.len - self.rcv.wnd;
         @memcpy(self.buf[offset .. offset + data.len], data);
-        self.rcv.nxt = @intCast(seg.seq + data.len);
+        self.rcv.nxt = seg.seq +% @as(u32, @intCast(data.len));
         self.rcv.wnd -= @intCast(data.len);
     }
 
@@ -478,6 +490,7 @@ const Pcb = struct {
             util.debugf(@src(), "release backlog entry, state={t}", .{b.state});
             if (b.state != .closed) {
                 _ = b.output(.{ .rst = true }, &[_]u8{}) catch {};
+                b.changeState(.closed);
             }
             b.release();
         }
@@ -579,11 +592,11 @@ const Pcb = struct {
             pcb.local = local;
             pcb.remote = remote;
             pcb.rcv.wnd = pcb.buf.len;
-            pcb.rcv.nxt = seg.seq + 1;
+            pcb.rcv.nxt = seg.seq +% 1;
             pcb.irs = seg.seq;
             pcb.iss = platform.random32();
             _ = try pcb.output(.{ .syn = true, .ack = true }, &[_]u8{});
-            pcb.snd.nxt = pcb.iss + 1;
+            pcb.snd.nxt = pcb.iss +% 1;
             pcb.snd.una = pcb.iss;
             pcb.changeState(.syn_received);
             // ignore: Note that any other incoming control or data (combined with SYN)
@@ -622,7 +635,7 @@ const Pcb = struct {
         // 3rd check security and precedence (ignore)
         // 4th check the SYN bit
         if (seg.flg.syn) {
-            self.rcv.nxt = seg.seq + 1;
+            self.rcv.nxt = seg.seq +% 1;
             self.irs = seg.seq;
             if (acceptable) {
                 self.snd.una = seg.ack;
@@ -702,7 +715,7 @@ const Pcb = struct {
         switch (self.state) {
             .syn_received, .established, .fin_wait_1, .fin_wait_2, .close_wait, .closing, .last_ack, .time_wait => {
                 if (seg.flg.syn) {
-                    _ = try self.output(seg.flg, &[_]u8{});
+                    _ = try self.output(.{ .rst = true }, &[_]u8{});
                     util.errorf(@src(), "connection reset", .{});
                     self.changeState(.closed);
                     self.release();
@@ -809,7 +822,7 @@ const Pcb = struct {
                 // drop segment
                 return;
             }
-            self.rcv.nxt = seg.seq + 1;
+            self.rcv.nxt = seg.seq +% 1;
             _ = try self.output(.{ .ack = true }, &[_]u8{});
             switch (self.state) {
                 .syn_received, .established => {
@@ -924,7 +937,11 @@ const PcbTable = struct {
                 util.debugf(@src(), "waiting for connection...", .{});
             },
             .active => {
-                const resolved_local = try self.resolveLocal(pcb.local, remote);
+                const resolved_local = try self.resolveLocal(local, remote);
+                if (self.select(resolved_local, remote)) {
+                    util.errorf(@src(), "address already in use", .{});
+                    return error.TcpAlreadyInUse;
+                }
                 util.debugf(@src(), "resolve local address, addr={f}", .{resolved_local});
                 pcb.local = resolved_local;
                 pcb.remote = remote;
@@ -935,7 +952,7 @@ const PcbTable = struct {
                     return error.PcbOutputFailure;
                 };
                 pcb.snd.una = pcb.iss;
-                pcb.snd.nxt = pcb.iss + 1;
+                pcb.snd.nxt = pcb.iss +% 1;
                 pcb.changeState(.syn_sent);
             },
         }
@@ -997,13 +1014,13 @@ const PcbTable = struct {
             .syn_received, .established => {
                 util.debugf(@src(), "close connection", .{});
                 _ = try pcb.output(.{ .ack = true, .fin = true }, &[_]u8{});
-                pcb.snd.nxt += 1;
+                pcb.snd.nxt +%= 1;
                 pcb.changeState(.fin_wait_1);
             },
             .close_wait => {
                 util.debugf(@src(), "close connection", .{});
                 _ = try pcb.output(.{ .ack = true, .fin = true }, &[_]u8{});
-                pcb.snd.nxt += 1;
+                pcb.snd.nxt +%= 1;
                 pcb.changeState(.last_ack);
             },
             .fin_wait_1, .fin_wait_2, .closing, .last_ack, .time_wait => {
@@ -1039,6 +1056,10 @@ const PcbTable = struct {
         util.debugf(@src(), "local={f}, remote={f}", .{ pcb.local, remote });
 
         const resolved_local = try self.resolveLocal(pcb.local, remote);
+        if (self.select(resolved_local, remote)) {
+            util.errorf(@src(), "address already in use", .{});
+            return error.TcpAlreadyInUse;
+        }
         pcb.local = resolved_local;
         pcb.remote = remote;
         pcb.rcv.wnd = pcb.buf.len;
@@ -1048,7 +1069,7 @@ const PcbTable = struct {
             return error.PcbOutputFailure;
         };
         pcb.snd.una = pcb.iss;
-        pcb.snd.nxt = pcb.iss + 1;
+        pcb.snd.nxt = pcb.iss +% 1;
         pcb.changeState(.syn_sent);
 
         const state = pcb.state;
@@ -1070,7 +1091,6 @@ const PcbTable = struct {
         };
         pcb.mss = iface.dev().mtu - (ip.IpHdr.hdr_len_min + TcpHdr.hdr_len_min);
         util.debugf(@src(), "success, local={f}, remote={f}", .{ pcb.local, pcb.remote });
-        return desc;
     }
 
     pub fn bind(self: *Self, desc: usize, local: udp.SocketAddr) !void {
@@ -1204,7 +1224,7 @@ const PcbTable = struct {
                         pcb.release();
                         return error.PcbOutputFailure;
                     };
-                    pcb.snd.nxt += slen;
+                    pcb.snd.nxt +%= slen;
                     sent += slen;
                 }
                 return sent;
@@ -1312,7 +1332,7 @@ const PcbTable = struct {
             };
             resolved.addr = iface.unicast;
         }
-        if (local.port == .unspecified) {
+        if (local.port == udp.Port.unspecified) {
             resolved.port = try self.allocPort(local, remote);
         }
         return resolved;
@@ -1354,14 +1374,18 @@ pub fn init() !void {
     };
 }
 
-fn input(ipd: *const ip.IpHdr.Decoded, data: []const u8, iface: *ip.IpIface) !void {
-    const tcpd = try TcpHdr.decode(data, &ipd.hdr);
+fn input(ipd: *const ip.IpHdr.Decoded, data: []const u8, iface: *ip.IpIface) void {
+    var tcpd = TcpHdr.decode(data, &ipd.hdr) catch |err| {
+        util.errorf(@src(), "TcpHdr.decode() failure: {t}", .{err});
+        return;
+    };
+    defer tcpd.hdr.deinit();
 
     const src_is_broadcast = tcpd.hdr.src.addr.eql(.broadcast) or tcpd.hdr.src.addr.eql(iface.broadcast);
     const dst_is_broadcast = tcpd.hdr.dst.addr.eql(.broadcast) or tcpd.hdr.dst.addr.eql(iface.broadcast);
     if (src_is_broadcast or dst_is_broadcast) {
         util.errorf(@src(), "only supports unicast, src={f}, dst={f}", .{ tcpd.hdr.src, tcpd.hdr.dst });
-        return error.TcpUnicastOnly;
+        return;
     }
 
     util.debugf(@src(), "{f} => {f}, len={d}, dev={s}", .{ tcpd.hdr.src, tcpd.hdr.dst, data.len, iface.dev().name() });
@@ -1369,7 +1393,9 @@ fn input(ipd: *const ip.IpHdr.Decoded, data: []const u8, iface: *ip.IpIface) !vo
     util.debugdump(data);
 
     const seg: SegInfo = .init(tcpd);
-    try pcb_table.segmentArrives(seg, tcpd.payload, tcpd.hdr.dst, tcpd.hdr.src);
+    pcb_table.segmentArrives(seg, tcpd.payload, tcpd.hdr.dst, tcpd.hdr.src) catch |err| {
+        util.errorf(@src(), "pcb_table.segmentArrives() failure: {t}", .{err});
+    };
 }
 
 fn outputSegment(seq: u32, ack: u32, flg: TcpFlags, wnd: u16, data: []const u8, local: udp.SocketAddr, remote: udp.SocketAddr) !usize {
@@ -1401,7 +1427,7 @@ fn outputSegment(seq: u32, ack: u32, flg: TcpFlags, wnd: u16, data: []const u8, 
 
 fn replyRst(seg: SegInfo, local: udp.SocketAddr, remote: udp.SocketAddr) !void {
     if (!seg.flg.ack) {
-        _ = try outputSegment(0, seg.seq + seg.len, .{ .rst = true, .ack = true }, 0, &[_]u8{}, local, remote);
+        _ = try outputSegment(0, seg.seq +% seg.len, .{ .rst = true, .ack = true }, 0, &[_]u8{}, local, remote);
     } else {
         _ = try outputSegment(seg.ack, 0, .{ .rst = true }, 0, &[_]u8{}, local, remote);
     }

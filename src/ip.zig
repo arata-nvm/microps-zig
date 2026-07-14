@@ -148,10 +148,7 @@ pub const IpHdr = struct {
             .flags = flags_offset.flags,
             .offset = flags_offset.offset,
             .ttl = ttl,
-            .protocol = std.enums.fromInt(IpProtocolType, protocol_int) orelse {
-                util.errorf(@src(), "unknown protocol: {d}", .{protocol_int});
-                return error.IpUnknownProtocol;
-            },
+            .protocol = @enumFromInt(protocol_int),
             .sum = sum,
             .src = src,
             .dst = dst,
@@ -211,7 +208,7 @@ pub const IpHdr = struct {
         try writer.print("         id: {d}\n", .{self.id});
         try writer.print("     offset: [flags={f}, offset={d}]\n", .{ self.flags, self.offset });
         try writer.print("        ttl: {d}\n", .{self.ttl});
-        try writer.print("   protocol: {t}\n", .{self.protocol});
+        try writer.print("   protocol: {s}\n", .{std.enums.tagName(IpProtocolType, self.protocol) orelse "unknown"});
         try writer.print("        sum: 0x{x:0>4}\n", .{self.sum});
         try writer.print("        src: {f}\n", .{self.src});
         try writer.print("        dst: {f}\n", .{self.dst});
@@ -253,13 +250,14 @@ pub const IpProtocolType = enum(u8) {
     icmp = 1,
     tcp = 6,
     udp = 17,
+    _,
 };
 
 const IpProtocolHandler = *const fn (
     hdr: *const IpHdr.Decoded,
     data: []const u8,
     iface: *IpIface,
-) anyerror!void;
+) void;
 
 const IpProtocol = struct { type: IpProtocolType, handler: IpProtocolHandler };
 
@@ -303,14 +301,17 @@ pub fn registerProtocol(typ: IpProtocolType, handler: IpProtocolHandler) !void {
     util.infof(@src(), "success, type={t}", .{typ});
 }
 
-fn input(data: []const u8, dev: *device.Device) !void {
+fn input(data: []const u8, dev: *device.Device) void {
     util.debugf(@src(), "dev={s}, len={d}", .{ dev.name(), data.len });
     util.debugdump(data);
-    const d = try IpHdr.decode(data);
+    const d = IpHdr.decode(data) catch |err| {
+        util.errorf(@src(), "IpHdr.decode() failure: {t}", .{err});
+        return;
+    };
     const hdr = d.hdr;
     if (hdr.flags.mf or hdr.offset != 0) {
         util.errorf(@src(), "fragments does not supported", .{});
-        return error.IpFragmentedPacketNotSupported;
+        return;
     }
     const iface = dev.getIface(IpIface) orelse return;
     const dst = hdr.dst;
@@ -324,14 +325,16 @@ fn input(data: []const u8, dev: *device.Device) !void {
     util.dumpf("{f}", .{hdr});
     for (protocols.items) |proto| {
         if (proto.type == hdr.protocol) {
-            try proto.handler(&d, d.payload, iface);
+            proto.handler(&d, d.payload, iface);
             return;
         }
     }
     // unsupported protocol
     if (hdr.hlen() + 8 <= hdr.total) {
         // It should not be sent in response to ICMP error messages, but ICMP is always registered and will not reach this point.
-        _ = try icmp.output(.{ .dest_unreachable = .{ .code = .protocol_unreachable } }, data[0 .. hdr.hlen() + 8], iface.unicast, hdr.src);
+        _ = icmp.output(.{ .dest_unreachable = .{ .code = .protocol_unreachable } }, data[0 .. hdr.hlen() + 8], iface.unicast, hdr.src) catch |err| {
+            util.errorf(@src(), "icmp.output() failure: {t}", .{err});
+        };
     }
 }
 
@@ -380,7 +383,7 @@ fn selectIface(addr: IpAddr) ?*IpIface {
 
 fn outputDevice(iface: *IpIface, data: []const u8, target: IpAddr) !void {
     util.debugf(@src(), "dev={s}, len={d}, target={f}", .{ iface.dev().name(), data.len, target });
-    var hwaddr: [device.Device.addr_len]u8 = undefined;
+    var hwaddr: [device.Device.addr_len]u8 = @splat(0);
     if (iface.dev().flags.need_arp) {
         if (target.eql(iface.broadcast) or target.eql(.broadcast)) {
             hwaddr = iface.dev().broadcast;

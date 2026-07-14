@@ -63,12 +63,17 @@ pub fn hexdump(writer: *std.Io.Writer, data: []const u8) !void {
     try writer.print("+------+-------------------------------------------------+------------------+\n", .{});
 }
 
+var dump_buf_lock: platform.Lock = .{};
 var dump_buf: [8192]u8 = undefined;
 
 pub fn debugdump(data: []const u8) void {
     if (!build_options.hexdump) {
         return;
     }
+
+    dump_buf_lock.acquire();
+    defer dump_buf_lock.release();
+
     var w = std.Io.Writer.fixed(&dump_buf);
     hexdump(&w, data) catch {};
     platform.log(w.buffered());

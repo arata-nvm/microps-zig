@@ -57,7 +57,6 @@ pub fn init(name: []const u8, addr: ?ether.EtherAddr) !*device.Device {
 
     const allocator = platform.allocator;
     const tap = try allocator.create(EtherTap);
-    errdefer allocator.destroy(tap);
 
     tap.* = .{
         .dev = device.Device.init(
@@ -103,6 +102,7 @@ pub fn setDefaultAddr(dev: *device.Device) !void {
     var ifr = tap.ifr();
     _ = sys(linux.ioctl(soc, linux.SIOCGIFHWADDR, @intFromPtr(&ifr))) catch |err| {
         util.errorf(@src(), "ioctl(SIOCGIFHWADDR): {t}, dev={s}", .{ err, dev.name() });
+        return err;
     };
     dev.addr[0..ether.EtherAddr.len].* = ifr.ifru.hwaddr.data[0..ether.EtherAddr.len].*;
 }
@@ -119,6 +119,7 @@ fn open(dev: *device.Device) !void {
         util.errorf(@src(), "open: {t}, dev={s}", .{ err, dev.name() });
         return err;
     });
+    errdefer _ = linux.close(tap.fd);
 
     var ifr = tap.ifr();
     ifr.ifru.flags = @bitCast(IFF_TAP | IFF_NO_PI);
@@ -154,7 +155,7 @@ fn open(dev: *device.Device) !void {
         addr = ether.EtherAddr.fromBytes(dev.addr[0..ether.EtherAddr.len]);
     }
 
-    const ts = linux.timespec{ .sec = 0, .nsec = 100 * std.time.ns_per_ms };
+    const ts = linux.timespec{ .sec = 0, .nsec = 100 * std.time.ns_per_us };
     _ = linux.nanosleep(&ts, null);
 
     util.infof(@src(), "dev={s}, addr={f}", .{ dev.name(), addr });
@@ -184,7 +185,7 @@ fn output(dev: *device.Device, typ: net.ProtocolType, data: []const u8, dst: ?[]
         .type = typ,
     };
 
-    var frame: [ether.frame_max]u8 = undefined;
+    var frame: [ether.frame_max]u8 = @splat(0);
     var w: std.Io.Writer = .fixed(&frame);
     try hdr.encode(&w);
     try w.writeAll(data);
@@ -220,7 +221,7 @@ fn input(dev: *device.Device, frame: []const u8) !void {
     return net.input(d.hdr.type, d.payload, dev);
 }
 
-fn isr(_: u32, dev: *device.Device) !void {
+fn isr(_: u32, dev: *device.Device) void {
     const tap = EtherTap.from(dev);
 
     var buf: [ether.frame_max]u8 = undefined;
@@ -229,9 +230,11 @@ fn isr(_: u32, dev: *device.Device) !void {
             error.WouldBlock => return,
             else => {
                 util.errorf(@src(), "read: {t}, dev={s}", .{ err, dev.name() });
-                return err;
+                return;
             },
         };
-        try input(dev, buf[0..n]);
+        input(dev, buf[0..n]) catch |err| {
+            util.errorf(@src(), "input() failure: {t}", .{err});
+        };
     }
 }

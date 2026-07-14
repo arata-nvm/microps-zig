@@ -40,13 +40,13 @@ pub fn register(interval: std.Io.Duration, handler: *const fn () void) !void {
     util.infof(@src(), "success, interval={f}", .{interval});
 }
 
-fn timerIrqHandler(irq: u32, arg: ?*anyopaque) !void {
+fn timerIrqHandler(irq: u32, arg: ?*anyopaque) void {
     _ = irq;
     _ = arg;
     const now = platform.now();
     for (timers.items) |*t| {
         const diff = t.last.durationTo(now);
-        if (t.interval.nanoseconds <= diff.nanoseconds) {
+        if (t.interval.nanoseconds < diff.nanoseconds) {
             t.handler();
             t.last = now;
         }

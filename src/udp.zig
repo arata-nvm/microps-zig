@@ -310,18 +310,24 @@ const PcbTable = struct {
     }
 
     pub fn sendto(self: *Self, desc: usize, data: []const u8, remote: SocketAddr) !usize {
-        self.lock.acquire();
-        defer self.lock.release();
+        const local = blk: {
+            self.lock.acquire();
+            defer self.lock.release();
 
-        const pcb = self.get(desc) orelse return error.PcbNotFound;
-        const local = self.resolveLocal(pcb, remote);
-        util.debugf(@src(), "resolve local address, addr={f}", .{local});
-
+            const pcb = self.get(desc) orelse return error.PcbNotFound;
+            const local = try self.resolveLocal(pcb, remote);
+            util.debugf(@src(), "resolve local address, addr={f}", .{local});
+            break :blk local;
+        };
         return try output(local, remote, data);
     }
 
     fn resolveLocal(self: *Self, pcb: *Pcb, remote: SocketAddr) !SocketAddr {
         var local = pcb.local;
+        if (local.port == Port.unspecified) {
+            local.port = try self.allocPort(local);
+            pcb.local.port = local.port; // save dynamic source port
+        }
         if (local.addr.eql(.any)) {
             const iface = ip.route.getIface(remote.addr) orelse {
                 util.errorf(@src(), "iface not found that can reach foreign address, addr={f}", .{remote.addr});
@@ -329,20 +335,16 @@ const PcbTable = struct {
             };
             local.addr = iface.unicast;
         }
-        if (local.port == .unspecified) {
-            local.port = try self.allocPort(local.addr);
-            pcb.local.port = local.port; // save dynamic source port
-        }
         return local;
     }
 
-    fn allocPort(self: *Self, local: ip.IpIface) !Port {
+    fn allocPort(self: *Self, local: SocketAddr) !Port {
         const min: u32 = @intFromEnum(Port.dynamic_min);
         const max: u32 = @intFromEnum(Port.dynamic_max);
         for (min..max + 1) |p| {
             const port: Port = @enumFromInt(p);
-            local.port = port;
-            if (self.select(local) == null) {
+            const key: SocketAddr = .{ .addr = local.addr, .port = port };
+            if (self.select(key) == null) {
                 util.debugf(@src(), "dynamic assign local port, port={d}", .{port});
                 return port;
             }
@@ -367,25 +369,39 @@ pub fn init() !void {
     };
 }
 
-fn input(ipd: *const ip.IpHdr.Decoded, data: []const u8, iface: *ip.IpIface) !void {
-    const udpd = try UdpHdr.decode(data, &ipd.hdr);
+fn input(ipd: *const ip.IpHdr.Decoded, data: []const u8, iface: *ip.IpIface) void {
+    const udpd = UdpHdr.decode(data, &ipd.hdr) catch |err| {
+        util.errorf(@src(), "UdpHdr.decode() failure: {t}", .{err});
+        return;
+    };
     util.debugf(@src(), "{f} => {f}, len={d}, dev={s}", .{ udpd.hdr.src, udpd.hdr.dst, data.len, iface.dev().name() });
     util.dumpf("{f}", .{udpd.hdr});
     util.debugdump(data);
 
     pcb_table.deliver(udpd.hdr.dst, udpd.hdr.src, udpd.payload) catch |err| {
         util.errorf(@src(), "pcb_table.deliver() failure: {t}", .{err});
-        _ = try icmp.output(
-            .{ .dest_unreachable = .{ .code = .port_unreachable } },
-            ipd.raw[0 .. ipd.hdr.hlen() + 8],
-            iface.unicast,
-            ipd.hdr.src,
-        );
-        return err;
+        switch (err) {
+            error.PcbNotInUse => {
+                _ = icmp.output(
+                    .{ .dest_unreachable = .{ .code = .port_unreachable } },
+                    ipd.raw[0 .. ipd.hdr.hlen() + 8],
+                    iface.unicast,
+                    ipd.hdr.src,
+                ) catch |err2| {
+                    util.errorf(@src(), "icmp.output() failure: {t}", .{err2});
+                };
+            },
+            else => {},
+        }
     };
 }
 
 fn output(src: SocketAddr, dst: SocketAddr, data: []const u8) !usize {
+    if (ip.payload_size_max < UdpHdr.hdr_len + data.len) {
+        util.errorf(@src(), "too long", .{});
+        return error.UdpTooLong;
+    }
+
     var buf: [ip.payload_size_max]u8 = undefined;
     var w: std.Io.Writer = .fixed(&buf);
     const hdr = UdpHdr{
