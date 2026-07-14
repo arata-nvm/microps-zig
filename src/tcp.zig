@@ -278,6 +278,12 @@ const SndVars = struct {
     wl1: u32 = 0,
     // 最後に受信したウィンドウ更新の確認応答番号
     wl2: u32 = 0,
+    // 初期送信シーケンス番号
+    iss: u32 = 0,
+
+    fn init(iss: u32) Self {
+        return .{ .iss = iss, .una = iss, .nxt = iss };
+    }
 
     fn ackAcceptable(self: Self, ack: u32) bool {
         return self.una <= ack and ack <= self.nxt;
@@ -319,6 +325,8 @@ const RcvVars = struct {
     wnd: u16 = 0,
     // 緊急ポインタ
     up: u16 = 0,
+    // 初期受信シーケンス番号
+    irs: u32 = 0,
 
     fn inWindow(self: Self, seq: u32) bool {
         return self.nxt <= seq and seq < self.nxt +% self.wnd;
@@ -338,6 +346,11 @@ const RcvVars = struct {
                 return self.inWindow(seg.seq) or self.inWindow(seg.seq +% seg.len -% 1);
             }
         }
+    }
+
+    fn acceptSyn(self: *Self, seq: u32) void {
+        self.irs = seq;
+        self.nxt = seq +% 1;
     }
 };
 
@@ -406,11 +419,7 @@ const Pcb = struct {
     local: udp.SocketAddr = .{},
     remote: udp.SocketAddr = .{},
     snd: SndVars = .{},
-    // 初期送信シーケンス番号
-    iss: u32 = 0,
     rcv: RcvVars = .{},
-    // 初期受信シーケンス番号
-    irs: u32 = 0,
     mss: u16 = 0,
     buf: [65535]u8 = undefined,
     task: sched.Task = .{},
@@ -550,7 +559,7 @@ const Pcb = struct {
     }
 
     fn output(self: *Pcb, flg: TcpFlags, data: []const u8) !usize {
-        const seq = if (flg.syn) self.iss else self.snd.nxt;
+        const seq = if (flg.syn) self.snd.iss else self.snd.nxt;
         const len: u32 = @as(u32, @intCast(data.len)) + flg.seqLen();
         if (len > 0) {
             try self.addRetransQueue(seq, flg, data, len);
@@ -594,11 +603,9 @@ const Pcb = struct {
             pcb.local = local;
             pcb.remote = remote;
             pcb.rcv.wnd = pcb.buf.len;
-            pcb.rcv.nxt = seg.seq +% 1;
-            pcb.irs = seg.seq;
-            pcb.iss = platform.random32();
+            pcb.rcv.acceptSyn(seg.seq);
+            pcb.snd = .init(platform.random32());
             _ = try pcb.output(.{ .syn = true, .ack = true }, &[_]u8{});
-            pcb.snd.una = pcb.iss;
             pcb.changeState(.syn_received);
             // ignore: Note that any other incoming control or data (combined with SYN)
             // will be processed in the SYN-RECEIVED state, but processing of SYN and ACK
@@ -636,8 +643,7 @@ const Pcb = struct {
         // 3rd check security and precedence (ignore)
         // 4th check the SYN bit
         if (seg.flg.syn) {
-            self.rcv.nxt = seg.seq +% 1;
-            self.irs = seg.seq;
+            self.rcv.acceptSyn(seg.seq);
             if (acceptable) {
                 self.snd.una = seg.ack;
                 self.cleanupRetransQueue();
@@ -947,12 +953,11 @@ const PcbTable = struct {
                 pcb.local = resolved_local;
                 pcb.remote = remote;
                 pcb.rcv.wnd = pcb.buf.len;
-                pcb.iss = platform.random32();
+                pcb.snd = .init(platform.random32());
                 _ = pcb.output(.{ .syn = true }, &[_]u8{}) catch |err| {
                     util.errorf(@src(), "pcb.output() failure: {t}", .{err});
                     return error.PcbOutputFailure;
                 };
-                pcb.snd.una = pcb.iss;
                 pcb.changeState(.syn_sent);
             },
         }
@@ -1061,12 +1066,11 @@ const PcbTable = struct {
         pcb.local = resolved_local;
         pcb.remote = remote;
         pcb.rcv.wnd = pcb.buf.len;
-        pcb.iss = platform.random32();
+        pcb.snd = .init(platform.random32());
         _ = pcb.output(.{ .syn = true }, &[_]u8{}) catch |err| {
             util.errorf(@src(), "pcb.output() failure: {t}", .{err});
             return error.PcbOutputFailure;
         };
-        pcb.snd.una = pcb.iss;
         pcb.changeState(.syn_sent);
 
         const state = pcb.state;
