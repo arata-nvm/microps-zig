@@ -249,8 +249,6 @@ pub const Mode = enum {
 };
 
 const State = enum {
-    const Self = @This();
-
     none,
     closed,
     listen,
@@ -475,10 +473,6 @@ const Pcb = struct {
     buf: [65535]u8 = undefined,
     task: sched.Task = .{},
     queue: util.Queue(QueueEntry) = .{},
-    tw_timer: std.Io.Timestamp = .zero,
-    parent: ?*Pcb = null,
-    backlog: util.Queue(*Pcb) = .{},
-    backlog_max: usize = 0,
 
     const PcbMode = enum {
         rfc793,
@@ -487,6 +481,10 @@ const Pcb = struct {
 
     fn changeState(self: *Pcb, new_state: StateData) void {
         util.debugf(@src(), "{t} => {t}", .{ self.state, new_state });
+        switch (self.state) {
+            .listen => self.releaseBacklog(),
+            else => {},
+        }
         self.state = new_state;
     }
 
@@ -498,7 +496,10 @@ const Pcb = struct {
     }
 
     fn timewaitElapsed(self: *Pcb, now: std.Io.Timestamp) bool {
-        return self.tw_timer.nanoseconds < now.nanoseconds;
+        return switch (self.state) {
+            .time_wait => |tw| tw.expires_at.nanoseconds < now.nanoseconds,
+            else => false,
+        };
     }
 
     fn processAck(self: *Pcb, seg: SegInfo) void {
@@ -547,7 +548,18 @@ const Pcb = struct {
             allocator.free(entry.data);
         }
 
-        while (self.backlog.pop()) |b| {
+        self.releaseBacklog();
+
+        self.* = .{};
+        util.debugf(@src(), "success", .{});
+    }
+
+    fn releaseBacklog(self: *Pcb) void {
+        const l = switch (self.state) {
+            .listen => |*l| l,
+            else => return,
+        };
+        while (l.backlog.pop()) |b| {
             util.debugf(@src(), "release backlog entry, state={t}", .{b.state});
             if (b.state != .closed) {
                 _ = b.output(.{ .rst = true }, &[_]u8{}) catch {};
@@ -555,9 +567,6 @@ const Pcb = struct {
             }
             b.release();
         }
-
-        self.* = .{};
-        util.debugf(@src(), "success", .{});
     }
 
     fn addRetransQueue(self: *Pcb, seq: u32, flg: TcpFlags, data: []const u8, len: u32) !void {
@@ -620,7 +629,7 @@ const Pcb = struct {
     }
 
     fn waitEstablished(self: *Pcb, lock: *platform.Lock) !void {
-        const initial = self.state;
+        const initial: State = self.state;
         while (self.state == initial or self.state == .syn_received) {
             self.task.sleep(lock, null) catch return error.Interrupted;
         }
@@ -643,12 +652,14 @@ const Pcb = struct {
         if (len > 0) {
             try self.addRetransQueue(seq, flg, data, len);
         }
-        const n = outputSegment(seq, self.rcv.nxt, flg, self.rcv.wnd, data, self.local, self.remote);
+        const n = try outputSegment(seq, self.rcv.nxt, flg, self.rcv.wnd, data, self.local, self.remote);
         self.snd.nxt = seq +% len;
         return n;
     }
 
     fn arrivesListen(self: *Pcb, seg: SegInfo, local: udp.SocketAddr, remote: udp.SocketAddr) !void {
+        const listen = self.state.listen;
+
         // 1st check for an RST
         if (seg.flg.rst) {
             return;
@@ -666,7 +677,7 @@ const Pcb = struct {
             var pcb = self;
             var parent: ?*Pcb = null;
             if (self.mode == .socket) {
-                if (self.backlog_max < self.backlog.num) {
+                if (listen.backlog_max < listen.backlog.num) {
                     util.warnf(@src(), "backlog is full", .{});
                     return;
                 }
@@ -805,13 +816,25 @@ const Pcb = struct {
             return;
         }
         switch (self.state) {
-            .syn_received => {
+            .syn_received => |sr| {
                 if (self.snd.ackAcceptable(seg.ack)) {
-                    self.changeState(.established);
-                    self.task.wakeup();
-                    if (self.parent) |parent| {
-                        try parent.backlog.push(self);
-                        parent.task.wakeup();
+                    if (sr.parent) |p| {
+                        switch (p.state) {
+                            .listen => |*l| {
+                                self.changeState(.established);
+                                self.task.wakeup();
+                                try l.backlog.push(self);
+                                p.task.wakeup();
+                            },
+                            else => {
+                                _ = try self.output(.{ .rst = true }, &[_]u8{});
+                                self.drop();
+                                return;
+                            },
+                        }
+                    } else {
+                        self.changeState(.established);
+                        self.task.wakeup();
                     }
                 } else {
                     try replyRst(seg, local, remote);
@@ -953,7 +976,7 @@ const PcbTable = struct {
             if (pcb.local.port != local.port) {
                 continue;
             }
-            if (!(pcb.local.addr.eql(local.addr) or pcb.local.addr.eql(.any)) and local.addr.eql(ip.IpAddr.any)) {
+            if (!(pcb.local.addr.eql(local.addr) or pcb.local.addr.eql(.any)) and !local.addr.eql(ip.IpAddr.any)) {
                 continue;
             }
 
@@ -972,6 +995,19 @@ const PcbTable = struct {
         return candidate;
     }
 
+    fn dropOrphans(self: *Self, parent: *Pcb) void {
+        for (&self.pcbs) |*child| {
+            const sr = switch (child.state) {
+                .syn_received => |sr| sr,
+                else => continue,
+            };
+            if (sr.parent == parent) {
+                _ = child.output(.{ .rst = true }, &[_]u8{}) catch {};
+                child.drop();
+            }
+        }
+    }
+
     pub fn open(self: *Self, local: udp.SocketAddr, remote: udp.SocketAddr, mode: Mode) !usize {
         self.lock.acquire();
         defer self.lock.release();
@@ -981,7 +1017,7 @@ const PcbTable = struct {
             return err;
         };
         const pcb = &self.pcbs[desc];
-        errdefer self.drop();
+        errdefer pcb.drop();
 
         util.debugf(@src(), "mode={t}, local={f}, remote={f}", .{ mode, local, remote });
         switch (mode) {
@@ -1051,18 +1087,21 @@ const PcbTable = struct {
                 util.errorf(@src(), "connection does not exist", .{});
                 return error.PcbConnectionDoesNotExist;
             },
-            .listen, .syn_sent => {
+            .listen => {
+                self.dropOrphans(pcb);
                 pcb.changeState(.closed);
             },
-            .syn_received, .established => {
-                util.debugf(@src(), "close connection", .{});
-                _ = try pcb.output(.{ .ack = true, .fin = true }, &[_]u8{});
-                pcb.changeState(.fin_wait_1);
+            .syn_sent => {
+                pcb.changeState(.closed);
             },
-            .close_wait => {
+            .syn_received, .established, .close_wait => {
                 util.debugf(@src(), "close connection", .{});
                 _ = try pcb.output(.{ .ack = true, .fin = true }, &[_]u8{});
-                pcb.changeState(.last_ack);
+                if (pcb.state == .close_wait) {
+                    pcb.changeState(.last_ack);
+                } else {
+                    pcb.changeState(.fin_wait_1);
+                }
             },
             .fin_wait_1, .fin_wait_2, .closing, .last_ack, .time_wait => {
                 util.errorf(@src(), "connection closing", .{});
@@ -1089,7 +1128,7 @@ const PcbTable = struct {
             util.errorf(@src(), "pcb not found: desc={d}", .{desc});
             return error.PcbNotFound;
         };
-        errdefer self.drop();
+        errdefer pcb.drop();
 
         util.debugf(@src(), "local={f}, remote={f}", .{ pcb.local, remote });
 
@@ -1171,12 +1210,15 @@ const PcbTable = struct {
             return error.NotFound;
         };
 
-        if (pcb.state != .listen) {
-            util.errorf(@src(), "not in LISTEN state", .{});
-            return error.NotListenState;
-        }
         while (true) {
-            const new_pcb = pcb.backlog.pop() orelse {
+            const l = switch (pcb.state) {
+                .listen => |*l| l,
+                else => {
+                    util.errorf(@src(), "not in LISTEN state", .{});
+                    return error.NotListenState;
+                },
+            };
+            const new_pcb = l.backlog.pop() orelse {
                 pcb.task.sleep(&self.lock, null) catch |err| {
                     util.debugf(@src(), "interrupted", .{});
                     return err;
@@ -1332,7 +1374,7 @@ const PcbTable = struct {
             if (pcb.state == .none) {
                 continue;
             }
-            if (pcb.state == .time_wait and pcb.timewaitElapsed(now)) {
+            if (pcb.timewaitElapsed(now)) {
                 util.debugf(@src(), "timewait has elapsed, desc={d}", .{desc});
                 pcb.drop();
                 continue;
