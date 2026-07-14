@@ -6,8 +6,11 @@ const udp = @import("udp.zig");
 const util = @import("util.zig");
 
 const sched = platform.sched;
+const timer = platform.timer;
 
 const TcpFlags = packed struct(u8) {
+    const Self = @This();
+
     fin: bool = false,
     syn: bool = false,
     rst: bool = false,
@@ -15,6 +18,10 @@ const TcpFlags = packed struct(u8) {
     ack: bool = false,
     urg: bool = false,
     zero: u2 = 0,
+
+    pub fn seqLen(self: Self) u32 {
+        return @intFromBool(self.syn) + @intFromBool(self.fin);
+    }
 
     pub fn format(
         self: @This(),
@@ -333,11 +340,50 @@ const SegInfo = struct {
     up: u16,
     flg: TcpFlags,
 
-    pub fn init(hdr: TcpHdr, payload_len: usize) Self {
-        var len: u16 = @intCast(payload_len - hdr.hlen());
-        if (hdr.flg.syn) len += 1;
-        if (hdr.flg.fin) len += 1;
-        return Self{ .seq = hdr.seq, .ack = hdr.ack, .len = len, .wnd = hdr.wnd, .up = hdr.up, .flg = hdr.flg };
+    pub fn init(d: TcpHdr.Decoded) Self {
+        const len: u16 = @intCast(d.payload.len + d.hdr.flg.seqLen());
+        return Self{
+            .seq = d.hdr.seq,
+            .ack = d.hdr.ack,
+            .len = len,
+            .wnd = d.hdr.wnd,
+            .up = d.hdr.up,
+            .flg = d.hdr.flg,
+        };
+    }
+};
+
+const retrans_timeout: std.Io.Duration = .fromMilliseconds(20);
+const retrans_deadline: std.Io.Duration = .fromSeconds(12);
+
+const QueueEntry = struct {
+    const Self = @This();
+
+    first: std.Io.Timestamp,
+    last: std.Io.Timestamp,
+    rto: std.Io.Duration = retrans_timeout,
+    seq: u32,
+    flg: TcpFlags,
+    len: u32,
+    data: []const u8,
+
+    fn fullyAckedBy(self: Self, una: u32) bool {
+        return self.seq + self.len <= una;
+    }
+
+    fn deadlineExceeded(self: Self, now: std.Io.Timestamp) bool {
+        const deadline = self.first.addDuration(retrans_deadline);
+        return deadline.nanoseconds < now.nanoseconds;
+    }
+
+    fn shouldRetransmit(self: Self, now: std.Io.Timestamp) bool {
+        const timeout = self.last.addDuration(self.rto);
+        return timeout.nanoseconds < now.nanoseconds;
+    }
+
+    fn backoff(self: *Self, now: std.Io.Timestamp) void {
+        self.last = now;
+        self.rto.nanoseconds *= 2;
     }
 };
 
@@ -354,6 +400,7 @@ const Pcb = struct {
     mss: u16 = 0,
     buf: [65535]u8 = undefined,
     task: sched.Task = .{},
+    queue: util.Queue(QueueEntry) = .{},
 
     fn changeState(self: *Pcb, new_state: State) void {
         util.debugf(@src(), "{t} => {t}", .{ self.state, new_state });
@@ -362,8 +409,7 @@ const Pcb = struct {
 
     fn processAck(self: *Pcb, seg: SegInfo) void {
         self.snd.una = seg.ack;
-        // TODO: Any segments on the retransmission queue
-        //       which are thereby entirely acknowledged are removed
+        self.cleanupRetransQueue();
         // ignore: Users should receive positive acknowledgments for buffers
         //         which have been SENT and fully acknowledged
         //         (i.e., SEND buffer should be returned with "ok" response)
@@ -400,14 +446,72 @@ const Pcb = struct {
                 return;
             },
         };
+
+        const allocator = platform.allocator();
+        while (self.queue.pop()) |entry| {
+            util.debugf(@src(), "free queue entry", .{});
+            allocator.free(entry.data);
+        }
+
         self.* = .{};
         util.debugf(@src(), "success", .{});
     }
 
+    fn addRetransQueue(self: *Pcb, seq: u32, flg: TcpFlags, data: []const u8, len: u32) !void {
+        const allocator = platform.allocator();
+        const ptr = try allocator.dupe(u8, data);
+        errdefer allocator.free(ptr);
+
+        const now = platform.now();
+        const entry: QueueEntry = .{
+            .first = now,
+            .last = now,
+            .seq = seq,
+            .flg = flg,
+            .len = len,
+            .data = ptr,
+        };
+        self.queue.push(entry) catch |err| {
+            util.errorf(@src(), "self.queue.push() failure: {t}", .{err});
+            return err;
+        };
+        util.debugf(@src(), "num={d}, seq={d}", .{ self.queue.num, entry.seq });
+    }
+
+    fn cleanupRetransQueue(self: *Pcb) void {
+        const allocator = platform.allocator();
+        while (self.queue.peek()) |entry| {
+            if (!entry.fullyAckedBy(self.snd.una)) {
+                break;
+            }
+            _ = self.queue.pop();
+            util.debugf(@src(), "num={d}, seq={d}", .{ self.queue.num, entry.seq });
+            allocator.free(entry.data);
+        }
+    }
+
+    fn emitRetrans(self: *Pcb) !void {
+        const now = platform.now();
+        var iter = self.queue.iterator();
+        while (iter.next()) |entry| {
+            if (entry.deadlineExceeded(now)) {
+                self.changeState(.closed);
+                self.task.wakeup();
+                return;
+            }
+            if (entry.shouldRetransmit(now)) {
+                util.debugf(@src(), "seq={d}", .{entry.seq});
+                _ = try outputSegment(entry.seq, self.rcv.nxt, entry.flg, self.rcv.wnd, entry.data, self.local, self.remote);
+                entry.backoff(now);
+            }
+        }
+    }
+
     fn output(self: *Pcb, flg: TcpFlags, data: []const u8) !usize {
         const seq = if (flg.syn) self.iss else self.snd.nxt;
-        if (flg.syn or flg.fin or data.len > 0) {
-            // TODO: add retransmission queue
+        const len: u32 = @as(u32, @intCast(data.len)) + flg.seqLen();
+        if (len > 0) {
+            try self.addRetransQueue(seq, flg, data, len);
         }
         return outputSegment(seq, self.rcv.nxt, flg, self.rcv.wnd, data, self.local, self.remote);
     }
@@ -721,7 +825,7 @@ const PcbTable = struct {
     }
 
     // rfc793 - section 3.9 [Event Processing > SEGMENT ARRIVES]
-    pub fn segmentArrives(self: *Self, seg: SegInfo, flags: TcpFlags, data: []const u8, local: udp.SocketAddr, remote: udp.SocketAddr) !void {
+    pub fn segmentArrives(self: *Self, seg: SegInfo, data: []const u8, local: udp.SocketAddr, remote: udp.SocketAddr) !void {
         self.lock.acquire();
         defer self.lock.release();
 
@@ -735,7 +839,7 @@ const PcbTable = struct {
                 util.debugf(@src(), "PCB is not found", .{});
             }
 
-            if (flags.rst) {
+            if (seg.flg.rst) {
                 return;
             }
             try replyRst(seg, local, remote);
@@ -749,6 +853,20 @@ const PcbTable = struct {
             else => try pcb.arrivesOtherwise(seg, data, local, remote),
         }
     }
+
+    pub fn timer(self: *Self) void {
+        self.lock.acquire();
+        defer self.lock.release();
+
+        for (&self.pcbs) |*pcb| {
+            if (pcb.state == .none) {
+                continue;
+            }
+            pcb.emitRetrans() catch |err| {
+                util.errorf(@src(), "pcb.emitRetrans() failure: {t}", .{err});
+            };
+        }
+    }
 };
 
 var pcb_table: PcbTable = .{};
@@ -756,6 +874,10 @@ var pcb_table: PcbTable = .{};
 pub fn init() !void {
     ip.registerProtocol(.tcp, input) catch |err| {
         util.errorf(@src(), "ip.registerProtocol() failure: {t}", .{err});
+        return err;
+    };
+    timer.register(.fromMilliseconds(100), timerHandler) catch |err| {
+        util.errorf(@src(), "timer.register() failure: {t}", .{err});
         return err;
     };
 }
@@ -774,8 +896,8 @@ fn input(ipd: *const ip.IpHdr.Decoded, data: []const u8, iface: *ip.IpIface) !vo
     util.dumpf("{f}", .{tcpd.hdr});
     util.debugdump(data);
 
-    const seg: SegInfo = .init(tcpd.hdr, data.len);
-    try pcb_table.segmentArrives(seg, tcpd.hdr.flg, tcpd.payload, tcpd.hdr.dst, tcpd.hdr.src);
+    const seg: SegInfo = .init(tcpd);
+    try pcb_table.segmentArrives(seg, tcpd.payload, tcpd.hdr.dst, tcpd.hdr.src);
 }
 
 fn outputSegment(seq: u32, ack: u32, flg: TcpFlags, wnd: u16, data: []const u8, local: udp.SocketAddr, remote: udp.SocketAddr) !usize {
@@ -811,6 +933,10 @@ fn replyRst(seg: SegInfo, local: udp.SocketAddr, remote: udp.SocketAddr) !void {
     } else {
         _ = try outputSegment(seg.ack, 0, .{ .rst = true }, 0, &[_]u8{}, local, remote);
     }
+}
+
+fn timerHandler() void {
+    pcb_table.timer();
 }
 
 pub const cmd = struct {

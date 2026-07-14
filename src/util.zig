@@ -135,10 +135,10 @@ pub fn Queue(comptime T: type) type {
         pub const Iterator = struct {
             entry: ?*Entry,
 
-            pub fn next(self: *Iterator) ?T {
+            pub fn next(self: *Iterator) ?*T {
                 const entry = self.entry orelse return null;
                 self.entry = entry.next;
-                return entry.data;
+                return &entry.data;
             }
         };
 
