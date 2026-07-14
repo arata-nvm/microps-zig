@@ -551,11 +551,40 @@ const Pcb = struct {
         // drop segment
     }
 
-    fn arrivesSynSent(_: *Pcb) !void {
+    fn arrivesSynSent(self: *Pcb, seg: SegInfo, local: udp.SocketAddr, remote: udp.SocketAddr) !void {
+        var acceptable: bool = false;
+
         // 1st check the ACK bit
+        if (seg.flg.ack) {
+            if (seg.ack <= self.iss or seg.ack > self.snd.nxt) {
+                _ = try outputSegment(seg.ack, 0, .{ .rst = true }, 0, &[_]u8{}, local, remote);
+                return;
+            }
+            acceptable = self.snd.ackAcceptable(seg.ack);
+        }
+
         // 2nd check the RST bit
         // 3rd check security and precedence (ignore)
         // 4th check the SYN bit
+        if (seg.flg.syn) {
+            self.rcv.nxt = seg.seq + 1;
+            self.irs = seg.seq;
+            if (acceptable) {
+                self.snd.una = seg.ack;
+                self.cleanupRetransQueue();
+            }
+            if (self.snd.una > self.iss) {
+                self.changeState(.established);
+                _ = try self.output(.{ .ack = true }, &[_]u8{});
+                // NOTE: not specified in the RFC793, but send window initialization required
+                self.snd.updateWindow(seg);
+                // ignore: continue processing at the sixth step below where the URG bit is checked
+                return;
+            } else {
+                // TODO: simmultaneous open
+            }
+        }
+
         // 5th, if neither of the SYN or RST bits is set then drop the segment and return
         // drop segment
     }
@@ -711,9 +740,19 @@ const PcbTable = struct {
                 util.debugf(@src(), "waiting for connection...", .{});
             },
             .active => {
-                // TODO
-                util.errorf(@src(), "active open does not implement", .{});
-                return error.TcpActiveOpenNotImplemented;
+                const resolved_local = try self.resolveLocal(pcb.local, remote);
+                util.debugf(@src(), "resolve local address, addr={f}", .{resolved_local});
+                pcb.local = resolved_local;
+                pcb.remote = remote;
+                pcb.rcv.wnd = pcb.buf.len;
+                pcb.iss = platform.random32();
+                _ = pcb.output(.{ .syn = true }, &[_]u8{}) catch |err| {
+                    util.errorf(@src(), "pcb.output() failure: {t}", .{err});
+                    return error.PcbOutputFailure;
+                };
+                pcb.snd.una = pcb.iss;
+                pcb.snd.nxt = pcb.iss + 1;
+                pcb.changeState(.syn_sent);
             },
         }
 
@@ -849,7 +888,7 @@ const PcbTable = struct {
         util.debugf(@src(), "state={t}", .{pcb.state});
         switch (pcb.state) {
             .listen => try pcb.arrivesListen(seg, local, remote),
-            .syn_sent => try pcb.arrivesSynSent(),
+            .syn_sent => try pcb.arrivesSynSent(seg, local, remote),
             else => try pcb.arrivesOtherwise(seg, data, local, remote),
         }
     }
@@ -866,6 +905,38 @@ const PcbTable = struct {
                 util.errorf(@src(), "pcb.emitRetrans() failure: {t}", .{err});
             };
         }
+    }
+
+    fn resolveLocal(self: *Self, local: udp.SocketAddr, remote: udp.SocketAddr) !udp.SocketAddr {
+        var resolved = local;
+        if (local.addr.eql(ip.IpAddr.any)) {
+            const iface = ip.route.getIface(remote.addr) orelse {
+                util.errorf(@src(), "iface not found that can reach foreign address, addr={f}", .{remote.addr});
+                return error.PcbNoRoute;
+            };
+            resolved.addr = iface.unicast;
+        }
+        if (local.port == udp.Port.unspecified) {
+            resolved.port = try self.allocPort(local, remote);
+        }
+        return resolved;
+    }
+
+    fn allocPort(self: *Self, local: udp.SocketAddr, remote: udp.SocketAddr) !udp.Port {
+        const min: u32 = @intFromEnum(udp.Port.dynamic_min);
+        const max: u32 = @intFromEnum(udp.Port.dynamic_max);
+        var key = local;
+        for (min..max + 1) |p| {
+            const port: udp.Port = @enumFromInt(p);
+            key.port = port;
+            if (self.select(key, remote) == null) {
+                util.debugf(@src(), "dynamic assign local port, port={d}", .{port});
+                return port;
+            }
+        }
+
+        util.debugf(@src(), "failed to dynamic assign local port, addr={f}", .{local.addr});
+        return error.PcbNoAvailablePort;
     }
 };
 

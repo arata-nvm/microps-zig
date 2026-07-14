@@ -144,8 +144,8 @@ fn cleanup() !void {
 
 fn appMain(_: std.Io) !void {
     const local = try udp.SocketAddr.fromString("0.0.0.0:7");
-    const remote = try udp.SocketAddr.fromString("0.0.0.0:0");
-    const desc = try tcp.cmd.open(local, remote, .passive);
+    const remote = try udp.SocketAddr.fromString("192.0.2.1:10007");
+    const desc = try tcp.cmd.open(local, remote, .active);
     util.debugf(@src(), "press Ctrl+C to terminate", .{});
 
     var buf: [128]u8 = undefined;

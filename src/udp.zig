@@ -312,33 +312,42 @@ const PcbTable = struct {
         defer self.lock.release();
 
         const pcb = self.get(desc) orelse return error.PcbNotFound;
+        const local = self.resolveLocal(pcb, remote);
+        util.debugf(@src(), "resolve local address, addr={f}", .{local});
 
+        return try output(local, remote, data);
+    }
+
+    fn resolveLocal(self: *Self, pcb: *Pcb, remote: SocketAddr) !SocketAddr {
         var local = pcb.local;
-        if (local.port == Port.unspecified) {
-            const min: u32 = @intFromEnum(Port.dynamic_min);
-            const max: u32 = @intFromEnum(Port.dynamic_max);
-            for (min..max + 1) |p| {
-                const port: Port = @enumFromInt(p);
-                local.port = port;
-                if (self.select(local) == null) {
-                    pcb.local.port = port; // save dynamic source port
-                    util.debugf(@src(), "dynamic assign local port, port={d}", .{port});
-                    break;
-                }
-            } else {
-                util.debugf(@src(), "failed to dynamic assign local port, addr={f}", .{local.addr});
-                return error.PcbNoAvailablePort;
-            }
-        }
         if (local.addr.eql(ip.IpAddr.any)) {
             const iface = ip.route.getIface(remote.addr) orelse {
                 util.errorf(@src(), "iface not found that can reach foreign address, addr={f}", .{remote.addr});
                 return error.PcbNoRoute;
             };
             local.addr = iface.unicast;
-            util.debugf(@src(), "select local address, addr={f}", .{local.addr});
         }
-        return try output(local, remote, data);
+        if (local.port == Port.unspecified) {
+            local.port = try self.allocPort(local.addr);
+            pcb.local.port = local.port; // save dynamic source port
+        }
+        return local;
+    }
+
+    fn allocPort(self: *Self, local: ip.IpIface) !Port {
+        const min: u32 = @intFromEnum(Port.dynamic_min);
+        const max: u32 = @intFromEnum(Port.dynamic_max);
+        for (min..max + 1) |p| {
+            const port: Port = @enumFromInt(p);
+            local.port = port;
+            if (self.select(local) == null) {
+                util.debugf(@src(), "dynamic assign local port, port={d}", .{port});
+                return port;
+            }
+        }
+
+        util.debugf(@src(), "failed to dynamic assign local port, addr={f}", .{local.addr});
+        return error.PcbNoAvailablePort;
     }
 };
 
