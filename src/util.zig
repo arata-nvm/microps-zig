@@ -179,7 +179,7 @@ test "queue" {
     var it = queue.iterator();
     var expected: u32 = 1;
     while (it.next()) |entry| : (expected += 1) {
-        try std.testing.expectEqual(expected, entry);
+        try std.testing.expectEqual(expected, entry.*);
     }
 
     try std.testing.expectEqual(1, queue.pop().?);

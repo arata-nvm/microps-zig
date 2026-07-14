@@ -16,7 +16,7 @@ pub const InitOptions = struct {
 };
 
 var io: ?std.Io = null;
-pub var allocator: std.mem.Allocator = undefined;
+pub var allocator: std.mem.Allocator = std.heap.c_allocator;
 var started: std.Io.Timestamp = .zero;
 
 var initialized: bool = false;
