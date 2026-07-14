@@ -555,7 +555,9 @@ const Pcb = struct {
         if (len > 0) {
             try self.addRetransQueue(seq, flg, data, len);
         }
-        return outputSegment(seq, self.rcv.nxt, flg, self.rcv.wnd, data, self.local, self.remote);
+        const n = outputSegment(seq, self.rcv.nxt, flg, self.rcv.wnd, data, self.local, self.remote);
+        self.snd.nxt = seq +% len;
+        return n;
     }
 
     fn arrivesListen(self: *Pcb, seg: SegInfo, local: udp.SocketAddr, remote: udp.SocketAddr) !void {
@@ -596,7 +598,6 @@ const Pcb = struct {
             pcb.irs = seg.seq;
             pcb.iss = platform.random32();
             _ = try pcb.output(.{ .syn = true, .ack = true }, &[_]u8{});
-            pcb.snd.nxt = pcb.iss +% 1;
             pcb.snd.una = pcb.iss;
             pcb.changeState(.syn_received);
             // ignore: Note that any other incoming control or data (combined with SYN)
@@ -952,7 +953,6 @@ const PcbTable = struct {
                     return error.PcbOutputFailure;
                 };
                 pcb.snd.una = pcb.iss;
-                pcb.snd.nxt = pcb.iss +% 1;
                 pcb.changeState(.syn_sent);
             },
         }
@@ -1014,13 +1014,11 @@ const PcbTable = struct {
             .syn_received, .established => {
                 util.debugf(@src(), "close connection", .{});
                 _ = try pcb.output(.{ .ack = true, .fin = true }, &[_]u8{});
-                pcb.snd.nxt +%= 1;
                 pcb.changeState(.fin_wait_1);
             },
             .close_wait => {
                 util.debugf(@src(), "close connection", .{});
                 _ = try pcb.output(.{ .ack = true, .fin = true }, &[_]u8{});
-                pcb.snd.nxt +%= 1;
                 pcb.changeState(.last_ack);
             },
             .fin_wait_1, .fin_wait_2, .closing, .last_ack, .time_wait => {
@@ -1069,7 +1067,6 @@ const PcbTable = struct {
             return error.PcbOutputFailure;
         };
         pcb.snd.una = pcb.iss;
-        pcb.snd.nxt = pcb.iss +% 1;
         pcb.changeState(.syn_sent);
 
         const state = pcb.state;
@@ -1224,7 +1221,6 @@ const PcbTable = struct {
                         pcb.release();
                         return error.PcbOutputFailure;
                     };
-                    pcb.snd.nxt +%= slen;
                     sent += slen;
                 }
                 return sent;
