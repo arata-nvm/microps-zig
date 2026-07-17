@@ -78,7 +78,7 @@ export fn sock_close(desc: c_int) c_int {
     switch (s.family) {
         c.AF_INET => switch (s.type) {
             c.SOCK_STREAM => tcp.cmd.close(s.desc) catch {},
-            c.SOCK_DGRAM => tcp.cmd.close(s.desc) catch {},
+            c.SOCK_DGRAM => udp.cmd.close(s.desc) catch {},
             else => util.warnf(@src(), "unknown type {d}", .{s.type}),
         },
         else => util.errorf(@src(), "unknown family {d}", .{s.family}),
