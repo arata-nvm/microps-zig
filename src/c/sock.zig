@@ -109,7 +109,7 @@ export fn sock_recvfrom(desc: c_int, buf: *anyopaque, n: usize, addr: ?*c.sockad
                         al.* = @sizeOf(c.sockaddr_in);
                     }
                 }
-                return 0;
+                return @intCast(ret.len);
             },
             else => {
                 util.errorf(@src(), "unsupported type {d}", .{s.type});
