@@ -815,35 +815,31 @@ const Pcb = struct {
             // drop segment
             return;
         }
-        switch (self.state) {
+        sw: switch (self.state) {
             .syn_received => |sr| {
-                if (self.snd.ackAcceptable(seg.ack)) {
-                    if (sr.parent) |p| {
-                        switch (p.state) {
-                            .listen => |*l| {
-                                self.changeState(.established);
-                                self.task.wakeup();
-                                try l.backlog.push(self);
-                                p.task.wakeup();
-                            },
-                            else => {
-                                _ = try self.output(.{ .rst = true }, &[_]u8{});
-                                self.drop();
-                                return;
-                            },
-                        }
-                    } else {
-                        self.changeState(.established);
-                        self.task.wakeup();
-                    }
-                } else {
+                if (!self.snd.ackAcceptable(seg.ack)) {
                     try replyRst(seg, local, remote);
                     return;
                 }
+                if (sr.parent) |p| {
+                    const l = switch (p.state) {
+                        .listen => |*l| l,
+                        else => {
+                            _ = try self.output(.{ .rst = true }, &[_]u8{});
+                            self.drop();
+                            return;
+                        },
+                    };
+                    self.changeState(.established);
+                    self.task.wakeup();
+                    try l.backlog.push(self);
+                    p.task.wakeup();
+                } else {
+                    self.changeState(.established);
+                    self.task.wakeup();
+                }
+                continue :sw .established;
             },
-            else => {},
-        }
-        switch (self.state) {
             .established, .fin_wait_1, .fin_wait_2, .close_wait, .closing => {
                 if (self.snd.ackAdvances(seg.ack)) {
                     self.processAck(seg);
