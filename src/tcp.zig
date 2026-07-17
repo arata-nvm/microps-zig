@@ -761,9 +761,10 @@ const Pcb = struct {
     }
 
     fn arrivesOtherwise(self: *Pcb, seg: SegInfo, data: []const u8, local: udp.SocketAddr, remote: udp.SocketAddr) !void {
+        std.debug.assert(self.state.isSynchronized());
+
         // 1st check sequence number
-        const acceptable = self.state.isSynchronized() and self.rcv.accepts(seg);
-        if (!acceptable) {
+        if (!self.rcv.accepts(seg)) {
             if (!seg.flg.rst) {
                 _ = try self.output(.{ .ack = true }, &[_]u8{});
             }
@@ -778,27 +779,15 @@ const Pcb = struct {
         // numbers may be held for later processing.
 
         // 2nd check the RST bit
-        switch (self.state) {
-            .syn_received => {
-                if (seg.flg.rst) {
-                    self.drop();
-                    return;
-                }
-            },
-            .established, .fin_wait_1, .fin_wait_2, .close_wait => {
-                if (seg.flg.rst) {
+        if (seg.flg.rst) {
+            switch (self.state) {
+                .established, .fin_wait_1, .fin_wait_2, .close_wait => {
                     util.errorf(@src(), "connection reset", .{});
-                    self.drop();
-                    return;
-                }
-            },
-            .closing, .last_ack, .time_wait => {
-                if (seg.flg.rst) {
-                    self.drop();
-                    return;
-                }
-            },
-            else => {},
+                },
+                else => {},
+            }
+            self.drop();
+            return;
         }
 
         // 3rd check security and precedence (ignore)
