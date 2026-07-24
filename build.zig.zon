@@ -5,8 +5,13 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{},
     .paths = .{
+        "LICENSE",
+        "LICENSE.microps",
+        "README.md",
         "build.zig",
         "build.zig.zon",
+        "example",
+        "include",
         "src",
     },
 }
